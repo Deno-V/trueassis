@@ -1,0 +1,64 @@
+# 词表与约定 —— Agent 只能使用这里定义的取值，不要自创
+version: 1
+
+# 生活领域划分（domain）
+domains:
+  work:     { label: 工作,   desc: 职业产出、项目、代码、评审 }
+  life:     { label: 生活,   desc: 家务、行政、财务、社交、杂事 }
+  health:   { label: 健康,   desc: 运动、睡眠、饮食、体检、就医 }
+  learning: { label: 学习,   desc: 读书、课程、技术钻研、写作 }
+  hobby:    { label: 爱好,   desc: 骑行、摄影、音乐、手作 }
+  fun:      { label: 娱乐,   desc: 电影、游戏、演出、旅行 }
+  finance:  { label: 财务,   desc: 记账、投资、报销、保险 }
+  relation: { label: 关系,   desc: 家人、朋友、伴侣、人情往来 }
+
+# 条目类型（kind）
+kinds:
+  task:      一次性可完成的具体事项
+  project:   需要多步/多任务的长期目标，本身不"做"，靠子任务推进
+  recurring: 重复任务的【定义】，由 `assis recur run` 生成实例
+  event:     有固定时间点的日程（会议、电影场次、出发时间）
+  idea:      想法/愿望，尚未承诺去做，放 tasks/someday/
+
+# 状态机（status）
+#  inbox → next → active → done
+#                  ↘ blocked ↗
+#  任意状态 → cancelled（必须给 reason）
+#  active/next → someday（降级：改 status: idea 并移入 tasks/someday/）
+statuses:
+  inbox:     刚收集，未澄清
+  next:      已澄清，排队中，可随时开始
+  active:    正在进行
+  blocked:   被外部依赖阻塞（正文须写 blocked_by）
+  done:      已完成
+  cancelled: 已放弃（正文/字段须写 reason）
+
+# 优先级（priority）
+priorities:
+  P0: 今天必须完成，其他事情都可以往后放
+  P1: 本周关键，影响承诺或有硬 ddl
+  P2: 应该做，可调度
+  P3: 有空再说
+
+# 精力需求（energy）
+energies:
+  high: 需要深度专注（写代码、设计、推理）
+  mid:  常规脑力（评审、回信、整理）
+  low:  几乎不耗神（跑腿、打电话、归档、家务）
+
+# 执行场景（context），可多选
+contexts: [computer, phone, outdoor, errand, home, office, anywhere]
+
+# brief 判定阈值
+thresholds:
+  soon_days: 3          # due 在 N 天内 → 计入"临近"
+  stale_days: 14        # active 且 updated 超过 N 天未动 → 计入"停滞"
+  someday_review_days: 30  # someday 项超过 N 天未复盘 → 提醒复盘
+  max_suggestions: 3    # 一次最多给几条行动建议
+
+# 重复规则语法（recurring.rule）
+#   daily                 每天
+#   weekly:mon,fri        每周一、周五
+#   monthly:1,15          每月 1 号、15 号
+#   every:3d              每 3 天（自上次生成起算）
+#   weekday               工作日（周一至周五）

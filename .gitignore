@@ -1,0 +1,34 @@
+# ── 个人数据：只留本地，永不推送公共远端 ────────────────────────────
+/private/
+!/private/.gitkeep
+
+# 允许私有数据自带独立 git 仓库（见 docs/sync.md）
+# 若使用 private-remote 方案，private/ 内部自己有 .git，与主仓库互不干扰
+
+# ── 运行产物 ──────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.assis-cache/
+*.tmp
+*.bak
+
+# 撤销快照与操作流水：纯本地运行态，即使 private/ 挂私有仓库也不必同步
+private/.undo/
+private/oplog.jsonl
+
+# ── 系统/编辑器 ───────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+*.swp
+.vscode/*
+!.vscode/settings.json
+
+# ── AI 工具的本地会话态（规则文件本身要提交） ──────────────────────
+.codebuddy/session*/
+.claude/settings.local.json
+.trae/session*/
