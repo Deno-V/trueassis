@@ -116,7 +116,14 @@
 
 **逾期与无日期任务默认就会带出来**，不需要额外开关。只有在明确不想被它们干扰时才用 `--no-include-overdue`、`--no-include-undated` 关闭。
 
-`--status` 不给时默认是 `pending`，意思是**只回答「现在还欠着什么」**：带出 `scheduled`、`overdue`、`undated`、`missed`，但**不显示已完成、已取消，也不显示想法**。日常问「今天该做什么」正好需要这个默认值。
+先分清两个不同的轴，混淆它们会导致找不到数据：
+
+- **过滤轴**是 `--status` 的取值：`pending`、`open`、`done`、`cancelled`、`missed`、`archived`、`all`。它决定**要哪些记录**。
+- **分区轴**是 `data` 的键：`scheduled`、`overdue`、`undated`、`missed`、`done`、`cancelled`、`ideas`、`records`。它解释**这条记录为什么在这里**。
+
+两轴有三个同名值（`missed`、`done`、`cancelled`），但 `pending`、`open`、`all` **只存在于过滤轴**。所以**没有 `data["pending"]` 这个分区**，不要去找它。
+
+`--status pending` 是默认值，意思是**只回答「现在还欠着什么」**。这些欠着的事会按“为什么欠着”落进四个分区：今天该做的在 `scheduled`，历史欠账在 `overdue`，没有日期的在 `undated`，已错过不必补的在 `missed`。四个分区加起来就是 pending 的全部内容，因此默认查询**不显示已完成、已取消，也不显示想法**。日常问「今天该做什么」正好需要这个默认值。
 
 各取值的含义：
 

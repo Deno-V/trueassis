@@ -499,5 +499,17 @@ class TrueAssisTest(unittest.TestCase):
         self.assertEqual(["records"], result["queried"])
 
 
+    def test_filter_values_are_never_partition_names(self):
+        """pending / open / all 只存在于过滤轴，绝不能变成 data 的键。"""
+        partitions = {"records", "scheduled", "overdue", "undated", "done", "cancelled", "missed", "ideas"}
+        for status in ("pending", "open", "all", "done", "cancelled", "missed", "archived"):
+            result = self.service.query(self.query_args(status=status))
+            self.assertNotIn("pending", result["data"], f"status={status}")
+            self.assertNotIn("open", result["data"], f"status={status}")
+            self.assertNotIn("all", result["data"], f"status={status}")
+            self.assertTrue(set(result["data"]) <= partitions, f"status={status}")
+            self.assertTrue(set(result["queried"]) <= partitions, f"status={status}")
+
+
 if __name__ == "__main__":
     unittest.main()
