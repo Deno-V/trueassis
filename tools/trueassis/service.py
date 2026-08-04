@@ -116,7 +116,7 @@ def _in_range(value: Optional[str], start: Optional[date], end: Optional[date]) 
     return (start is None or day >= start) and (end is None or day <= end)
 
 
-def _occurrence_view(task: Dict[str, Any], original: date, override: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+def _occurrence_view(task: Dict[str, Any], original: date, override: Optional[Dict[str, Any]], body: str = "") -> Dict[str, Any]:
     scheduled = original
     state = "pending"
     result: Dict[str, Any] = {}
@@ -132,7 +132,7 @@ def _occurrence_view(task: Dict[str, Any], original: date, override: Optional[Di
         "original_date": original.isoformat(), "scheduled_date": scheduled.isoformat(),
         "status": state,
     })
-    return result
+    return _with_details(result, body)
 
 
 def _matching(data: Dict[str, Any], body: str, args: Any) -> bool:
@@ -173,27 +173,27 @@ def query(args: Any) -> Dict[str, Any]:
         if not _matching(data, body, args):
             continue
         if direct_lookup:
-            out["records"].append({
+            out["records"].append(_with_details({
                 "id": data["id"], "title": data["title"], "kind": data["kind"],
                 "category": data["category"], "tags": data.get("tags", []),
                 "status": data["status"], "schedule": data.get("schedule"),
                 "created_at": data["created_at"], "updated_at": data["updated_at"],
-            })
+            }, body))
             continue
         if data["kind"] == "idea":
             if status == "all" or status == data["status"]:
                 if not has_range or _in_range(data["created_at"], start, end):
-                    out["ideas"].append({key: data.get(key) for key in ("id", "title", "category", "tags", "status", "created_at")})
+                    out["ideas"].append(_with_details({key: data.get(key) for key in ("id", "title", "category", "tags", "status", "created_at")}, body))
             continue
 
         if data["schedule"]["type"] == "once":
             due_raw = data["schedule"].get("due")
             due = date.fromisoformat(due_raw) if due_raw else None
-            view = {"id": data["id"], "title": data["title"], "kind": "task", "category": data["category"],
+            view = _with_details({"id": data["id"], "title": data["title"], "kind": "task", "category": data["category"],
                     "tags": data.get("tags", []), "status": data["status"], "scheduled_date": due_raw,
                     "completed_at": data.get("completed_at"), "completed_on": _settled_on(data, "completed"),
                     "cancelled_at": data.get("cancelled_at"), "cancelled_on": _settled_on(data, "cancelled"),
-                    "cancel_reason": data.get("cancel_reason")}
+                    "cancel_reason": data.get("cancel_reason")}, body)
             if data["status"] == "done" and status in {"all", "done"} and _in_range(_settled_on(data, "completed"), start, end):
                 out["done"].append(view)
             elif data["status"] == "cancelled" and status in {"all", "cancelled"} and _in_range(_settled_on(data, "cancelled"), start, end):
@@ -217,13 +217,13 @@ def query(args: Any) -> Dict[str, Any]:
         if data["status"] in {"done", "cancelled"}:
             closed_on = _settled_on(data, "completed" if data["status"] == "done" else "cancelled")
             if status in {"all", data["status"]} and _in_range(closed_on, start, end):
-                out[data["status"]].append({"id": data["id"], "title": data["title"], "kind": "task-series",
-                                             "category": data["category"], "status": data["status"], "on": closed_on})
+                out[data["status"]].append(_with_details({"id": data["id"], "title": data["title"], "kind": "task-series",
+                                             "category": data["category"], "status": data["status"], "on": closed_on}, body))
             continue
 
         generated: Dict[str, Dict[str, Any]] = {}
         for original in occurrence_dates(data, scan_start, scan_end):
-            view = _occurrence_view(data, original, occurrence_override(data, original))
+            view = _occurrence_view(data, original, occurrence_override(data, original), body)
             generated[original.isoformat()] = view
 
         for occurrence in data.get("occurrences", []):
@@ -231,11 +231,11 @@ def query(args: Any) -> Dict[str, Any]:
             scheduled = date.fromisoformat(occurrence.get("scheduled_date") or occurrence["original_date"])
             state = occurrence.get("status", "pending")
             if state == "done" and status in {"all", "done"} and _in_range(_settled_on(occurrence, "completed"), start, end):
-                out["done"].append(_occurrence_view(data, original, occurrence))
+                out["done"].append(_occurrence_view(data, original, occurrence, body))
             elif state == "cancelled" and status in {"all", "cancelled"} and _in_range(_settled_on(occurrence, "cancelled"), start, end):
-                out["cancelled"].append(_occurrence_view(data, original, occurrence))
+                out["cancelled"].append(_occurrence_view(data, original, occurrence, body))
             elif state == "pending" and status in {"all", "pending", "open"} and start <= scheduled <= end:
-                generated[original.isoformat()] = _occurrence_view(data, original, occurrence)
+                generated[original.isoformat()] = _occurrence_view(data, original, occurrence, body)
 
         policy = data["schedule"]["overdue_policy"]
         if status in {"all", "pending", "open", "missed"}:
@@ -255,7 +255,7 @@ def query(args: Any) -> Dict[str, Any]:
             horizon = start - timedelta(days=max(args.overdue_days, 0))
             carry_start = max(_first_schedule_date(data), horizon)
             for original in occurrence_dates(data, carry_start, debt_before - timedelta(days=1)):
-                view = _occurrence_view(data, original, occurrence_override(data, original))
+                view = _occurrence_view(data, original, occurrence_override(data, original), body)
                 scheduled = date.fromisoformat(view["scheduled_date"])
                 if view["status"] != "pending" or start <= scheduled <= end:
                     continue
@@ -374,6 +374,35 @@ def _section_bounds(lines: list, heading: str) -> Optional[tuple]:
                     break
             return index, end
     return None
+
+
+def _body_details(body: str) -> Dict[str, str]:
+    """从正文提取可供查询展示的细节：说明正文与补充内容。"""
+    lines = body.splitlines()
+    note = supplement = ""
+    for heading in DESCRIPTION_HEADINGS:
+        bounds = _section_bounds(lines, heading)
+        if bounds:
+            start, end = bounds
+            note = "\n".join(lines[start + 1:end]).strip()
+            break
+    sup = _section_bounds(lines, SUPPLEMENT_HEADING)
+    if sup:
+        start, end = sup
+        supplement = "\n".join(lines[start + 1:end]).strip()
+    result: Dict[str, str] = {}
+    if note:
+        result["note"] = note
+    if supplement:
+        result["supplement"] = supplement
+    return result
+
+
+def _with_details(view: Dict[str, Any], body: str) -> Dict[str, Any]:
+    details = _body_details(body)
+    if details:
+        view["details"] = details
+    return view
 
 
 def _retitle(body: str, title: str) -> str:
