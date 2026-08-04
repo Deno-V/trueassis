@@ -350,5 +350,46 @@ class TrueAssisTest(unittest.TestCase):
         self.assertEqual(1, text.count("第二句"))
 
 
+    def test_day_start_defaults_to_natural_day(self):
+        self.assertEqual("00:00", self.storage.day_start_label())
+
+    def test_day_start_shifts_logical_date_for_night_owls(self):
+        import datetime
+        from trueassis import dayclock
+        self.storage.set_day_start("04:00")
+        boundary = self.storage.day_start()
+        self.assertEqual((4, 0), boundary)
+        before = datetime.datetime(2026, 8, 5, 2, 30)
+        after = datetime.datetime(2026, 8, 5, 4, 0)
+        self.assertEqual(datetime.date(2026, 8, 4), dayclock.logical_date(before, boundary))
+        self.assertEqual(datetime.date(2026, 8, 5), dayclock.logical_date(after, boundary))
+
+    def test_day_start_rejects_invalid_values(self):
+        from trueassis import dayclock
+        for bad in ("25:00", "4", "abc", "04:70", "-1:00"):
+            with self.assertRaises(ValueError):
+                dayclock.parse_clock(bad)
+
+    def test_corrupt_config_falls_back_to_default(self):
+        from trueassis import dayclock
+        self.storage.set_day_start("05:00")
+        self.storage.config_path().write_text("{ not json", encoding="utf-8")
+        dayclock.reset_cache()
+        self.assertEqual("00:00", self.storage.day_start_label())
+
+    def test_config_roundtrip_persists_and_reports(self):
+        import argparse as ap
+        result = self.service.configure(ap.Namespace(day_start="03:30"))
+        self.assertEqual("03:30", result["day_start"])
+        again = self.service.configure(ap.Namespace(day_start=None))
+        self.assertEqual("03:30", again["day_start"])
+        self.assertIn("03:30", again["explain"])
+
+    def test_query_reports_day_start(self):
+        self.storage.set_day_start("04:00")
+        result = self.service.query(self.query_args())
+        self.assertEqual("04:00", result["day_start"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -8,6 +8,8 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Tuple
 
+from . import dayclock
+
 ROOT = Path(os.environ.get("TRUEASSIS_ROOT", Path(__file__).resolve().parents[2])).resolve()
 PRIVATE = ROOT / "private"
 TASKS = PRIVATE / "tasks"
@@ -28,12 +30,50 @@ CATEGORIES = {
 
 
 def now_iso() -> str:
+    """真实墙钟时刻，用于审计。永不参与归属判断，因此不受日界影响。"""
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
+def config_path() -> Path:
+    return PRIVATE / "config.json"
+
+
+def load_config() -> Dict[str, Any]:
+    return dayclock.load_config(config_path())
+
+
+def save_config(config: Dict[str, Any]) -> None:
+    dayclock.parse_clock(config.get("day_start", dayclock.DEFAULT_DAY_START))
+    atomic_write(config_path(), json.dumps(config, ensure_ascii=False, indent=2) + "\n")
+    dayclock.reset_cache()
+
+
+def set_day_start(value: str) -> Dict[str, Any]:
+    """设置日界时间。它是全系统归属判断的基准，只在初始化或用户明确要求时改动。"""
+    hour, minute = dayclock.parse_clock(value)
+    config = dict(load_config())
+    config["day_start"] = f"{hour:02d}:{minute:02d}"
+    config.setdefault("created_at", now_iso())
+    config["updated_at"] = now_iso()
+    save_config(config)
+    return load_config()
+
+
+def day_start() -> Tuple[int, int]:
+    return dayclock.day_start(config_path(), os.environ.get("TRUEASSIS_DAY_START"))
+
+
+def day_start_label() -> str:
+    hour, minute = day_start()
+    return f"{hour:02d}:{minute:02d}"
+
+
 def today() -> date:
+    """逻辑日：日界之前的时刻仍归属前一天。所有归属判断都必须走这里。"""
     override = os.environ.get("TRUEASSIS_TODAY")
-    return date.fromisoformat(override) if override else date.today()
+    if override:
+        return date.fromisoformat(override)
+    return dayclock.logical_date(datetime.now(), day_start())
 
 
 def parse_date(value: Optional[str], *, required: bool = False) -> Optional[date]:

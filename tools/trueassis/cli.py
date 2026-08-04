@@ -6,7 +6,7 @@ import sys
 from typing import Any
 
 from .report import generate_report
-from .service import create_idea, create_task, query, update
+from .service import configure, create_idea, create_task, query, update
 from .storage import CATEGORIES, ensure_private
 
 
@@ -79,6 +79,10 @@ def build_parser() -> argparse.ArgumentParser:
     change.add_argument("--month-days")
     change.add_argument("--until")
     change.set_defaults(handler=update)
+
+    setting = sub.add_parser("config", help="查看或设置日界时间")
+    setting.add_argument("--day-start", help="一天从几点开始算，如 04:00；夜间到这个点之前都算前一天")
+    setting.set_defaults(handler=configure)
 
     report = sub.add_parser("report", help="生成日报或周报")
     report.add_argument("period", choices=["daily", "weekly"])

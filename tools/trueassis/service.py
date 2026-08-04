@@ -5,8 +5,9 @@ from typing import Any, Dict, Iterable, Optional
 
 from .recurrence import (is_scheduled, make_version, normalize_month_days,
                          normalize_weekdays, occurrence_dates, occurrence_override)
-from .storage import (CATEGORIES, find_record, iter_records, new_id, now_iso,
-                      parse_date, parse_tags, record_path, save_record, today)
+from .storage import (CATEGORIES, day_start, day_start_label, find_record,
+          iter_records, load_config, new_id, now_iso, parse_date,
+          parse_tags, record_path, save_record, set_day_start, today)
 
 
 def _history(action: str, **details: Any) -> Dict[str, Any]:
@@ -30,6 +31,22 @@ def _settled_on(value: Dict[str, Any], key: str) -> Optional[str]:
         return direct
     stamp = value.get(f"{key}_at")
     return stamp[:10] if stamp else None
+
+
+def configure(args: Any) -> Dict[str, Any]:
+    """查看或设置日界时间。不传 --day-start 即只查看。"""
+    if getattr(args, "day_start", None):
+        config = set_day_start(args.day_start)
+    else:
+        config = load_config()
+    hour, minute = day_start()
+    return {
+        "ok": True,
+        "day_start": config.get("day_start"),
+        "logical_today": today().isoformat(),
+        "wall_clock": now_iso(),
+        "explain": f"每天从 {hour:02d}:{minute:02d} 开始计算；此刻归属 {today().isoformat()}",
+    }
 
 
 def create_task(args: Any) -> Dict[str, Any]:
@@ -273,6 +290,7 @@ def query(args: Any) -> Dict[str, Any]:
                         "include_overdue": bool(args.include_overdue),
                         "include_undated": bool(args.include_undated),
                         "overdue_days": args.overdue_days},
+            "day_start": day_start_label(),
             "data": out}
 
 
