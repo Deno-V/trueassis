@@ -166,6 +166,31 @@ def _matching(data: Dict[str, Any], body: str, args: Any) -> bool:
     return True
 
 
+# 分区可见性：只返回本次真正查询过的分区。
+# 这样「字段存在且为空」才明确表示确实没有，而不是根本没查，避免语义歧义。
+def _visible_partitions(kind: str, status: str, include_overdue: bool,
+      include_undated: bool, direct_lookup: bool) -> set:
+    if direct_lookup:
+        return {"records"}
+    visible = set()
+    if kind in {"all", "task"}:
+        if status in {"all", "pending", "open"}:
+            visible.add("scheduled")
+            if include_overdue:
+                visible.add("overdue")
+            if include_undated:
+                visible.add("undated")
+        if status in {"all", "pending", "open", "missed"}:
+            visible.add("missed")
+        if status in {"all", "done"}:
+            visible.add("done")
+        if status in {"all", "cancelled"}:
+            visible.add("cancelled")
+    if kind in {"all", "idea"} and status in {"all", "open", "archived"}:
+        visible.add("ideas")
+    return visible
+
+
 def query(args: Any) -> Dict[str, Any]:
     start = parse_date(args.from_) if args.from_ else None
     end = parse_date(args.to) if args.to else None
@@ -286,16 +311,21 @@ def query(args: Any) -> Dict[str, Any]:
 
     for values in out.values():
         values.sort(key=lambda item: (item.get("scheduled_date") or item.get("created_on") or item.get("created_at") or "", item.get("title", "")))
+    visible = _visible_partitions(args.kind, status, bool(args.include_overdue),
+             bool(args.include_undated), direct_lookup)
+    data = {key: values for key, values in out.items() if key in visible}
     return {"ok": True,
-            "mode": "lookup" if direct_lookup else "range",
-            "from": None if direct_lookup else start.isoformat(),
-            "to": None if direct_lookup else end.isoformat(),
-            "filters": {"kind": args.kind, "status": status, "category": args.category, "tag": args.tag,
-                        "include_overdue": bool(args.include_overdue),
-                        "include_undated": bool(args.include_undated),
-                        "overdue_days": args.overdue_days},
-            "day_start": day_start_label(),
-            "data": out}
+        "mode": "lookup" if direct_lookup else "range",
+        "from": None if direct_lookup else start.isoformat(),
+        "to": None if direct_lookup else end.isoformat(),
+        "filters": {"kind": args.kind, "status": status, "category": args.category, "tag": args.tag,
+                 "include_overdue": bool(args.include_overdue),
+                 "include_undated": bool(args.include_undated),
+                 "overdue_days": args.overdue_days},
+        "day_start": day_start_label(),
+        # 本次查询覆盖的分区。未列出的分区本次没有查询，不能据此判断「没有」。
+        "queried": sorted(visible),
+        "data": data}
 
 
 def _first_schedule_date(task: Dict[str, Any]) -> date:

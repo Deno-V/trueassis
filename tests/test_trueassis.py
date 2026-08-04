@@ -192,8 +192,11 @@ class TrueAssisTest(unittest.TestCase):
         self.service.create_task(self.ns(title="欠着的报告", due="2026-08-01"))
         self.service.create_task(self.ns(title="无期限体检", category="health"))
         result = self.service.query(self.query_args(include_overdue=False, include_undated=False))
-        self.assertEqual([], result["data"]["overdue"])
-        self.assertEqual([], result["data"]["undated"])
+        # 关掉开关等于没查这两个分区，因此字段必须缺席而不是给出空数组
+        self.assertNotIn("overdue", result["data"])
+        self.assertNotIn("undated", result["data"])
+        self.assertNotIn("overdue", result["queried"])
+        self.assertNotIn("undated", result["queried"])
 
     def test_historical_range_keeps_plan_in_scheduled(self):
         self.service.create_task(self.ns(title="上周的报告", due="2026-08-02"))
@@ -411,10 +414,11 @@ class TrueAssisTest(unittest.TestCase):
         self.assertEqual(["今天计划"], [row["title"] for row in data["scheduled"]])
         self.assertEqual(["carry欠账"], [row["title"] for row in data["overdue"]])
         self.assertEqual(["无日期"], [row["title"] for row in data["undated"]])
-        # 默认 pending 只回答「还欠着什么」，不回顾已完成，也不混入想法
-        self.assertEqual([], data["done"])
-        self.assertEqual([], data["cancelled"])
-        self.assertEqual([], data["ideas"])
+        # 默认 pending 只回答「还欠着什么」：这些分区没有被查询，必须整个缺席，
+        # 否则空数组会被误读成「今天什么都没完成」
+        self.assertNotIn("done", data)
+        self.assertNotIn("cancelled", data)
+        self.assertNotIn("ideas", data)
 
     def test_status_all_includes_done_cancelled_and_ideas(self):
         self._mixed_fixture()
@@ -440,7 +444,7 @@ class TrueAssisTest(unittest.TestCase):
         self.assertEqual(["一次性错过", "循环错过"], sorted(row["title"] for row in pending))
         # --status missed 必须与默认查询里的 missed 分区一致，不能漏掉一次性任务
         self.assertEqual(sorted(row["title"] for row in pending), sorted(row["title"] for row in only["missed"]))
-        self.assertEqual([], only["scheduled"])
+        self.assertNotIn("scheduled", only)
 
     def test_idea_belongs_to_logical_day(self):
         """想法的归属日走逻辑日，而不是墙钟日期，否则深夜记的想法会落错一天。"""
@@ -459,6 +463,40 @@ class TrueAssisTest(unittest.TestCase):
         self.storage.save_record(path, data, body)
         rows = self.service.query(self.query_args(status="all", kind="idea"))["data"]["ideas"]
         self.assertEqual(["旧想法"], [row["title"] for row in rows])
+
+
+    def test_partitions_absent_unless_queried(self):
+        """字段存在即已查询；空数组才代表确实没有。这条契约不能被破坏。"""
+        cases = {
+            "pending": {"scheduled", "overdue", "undated", "missed"},
+            "done": {"done"},
+            "cancelled": {"cancelled"},
+            "missed": {"missed"},
+            "archived": {"ideas"},
+        }
+        for status, expected in cases.items():
+            result = self.service.query(self.query_args(status=status))
+            self.assertEqual(expected, set(result["data"]), f"status={status}")
+            self.assertEqual(sorted(expected), result["queried"], f"status={status}")
+
+    def test_status_all_exposes_every_partition(self):
+        result = self.service.query(self.query_args(status="all"))
+        expected = {"scheduled", "overdue", "undated", "missed", "done", "cancelled", "ideas"}
+        self.assertEqual(expected, set(result["data"]))
+
+    def test_kind_filter_drops_irrelevant_partitions(self):
+        tasks_only = self.service.query(self.query_args(status="all", kind="task"))["data"]
+        ideas_only = self.service.query(self.query_args(status="all", kind="idea"))["data"]
+        self.assertNotIn("ideas", tasks_only)
+        self.assertEqual({"ideas"}, set(ideas_only))
+
+    def test_lookup_mode_returns_only_records(self):
+        self.service.create_task(self.ns(title="金融报告", due="2026-08-04"))
+        result = self.service.query(self.query_args(from_=None, to=None, text="金融报告"))
+        self.assertEqual("lookup", result["mode"])
+        # 定位模式下其他分区并未参与计算，必须缺席
+        self.assertEqual({"records"}, set(result["data"]))
+        self.assertEqual(["records"], result["queried"])
 
 
 if __name__ == "__main__":

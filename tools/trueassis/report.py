@@ -84,16 +84,16 @@ def generate_report(args: Any) -> Dict[str, Any]:
     extras = _merge_manual(existing.get("自由补充", ""),
                            "\n\n".join(text.strip() for text in (getattr(args, "extra", None) or []) if text.strip()))
     # 区间内未完成的项按是否已过期拆开：前者是当期计划，后者是仍然欠着的债。
-    in_range_pending = [row for row in data["scheduled"] if not row.get("is_overdue")]
-    in_range_overdue = [row for row in data["scheduled"] if row.get("is_overdue")]
+    in_range_pending = [row for row in data.get("scheduled", []) if not row.get("is_overdue")]
+    in_range_overdue = [row for row in data.get("scheduled", []) if row.get("is_overdue")]
     lines = [heading, ""]
-    lines += _section("完成", data["done"])
-    lines += _section("取消", data["cancelled"])
+    lines += _section("完成", data.get("done", []))
+    lines += _section("取消", data.get("cancelled", []))
     lines += _section("计划内未完成", in_range_pending)
-    lines += _section("逾期未完成", in_range_overdue + data["overdue"])
-    lines += _section("错过未补", data["missed"], empty="（无）")
-    lines += _section("无日期待办", data["undated"])
-    lines += _section("新增想法", data["ideas"])
+    lines += _section("逾期未完成", in_range_overdue + data.get("overdue", []))
+    lines += _section("错过未补", data.get("missed", []), empty="（无）")
+    lines += _section("无日期待办", data.get("undated", []))
+    lines += _section("新增想法", data.get("ideas", []))
     lines += ["## 总结", "", summary, "", "## 复盘", "", reflection, ""]
     if extras:
         lines += ["## 自由补充", "", extras, ""]

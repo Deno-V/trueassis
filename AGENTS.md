@@ -120,7 +120,7 @@
 
 各取值的含义：
 
-| `--status` | 带出的分区 |
+| `--status` | `data` 中出现的分区 |
 | --- | --- |
 | `pending`（默认） | `scheduled`、`overdue`、`undated`、`missed` |
 | `open` | 同 `pending`；对想法则表示未归档 |
@@ -128,18 +128,35 @@
 | `done` | 只有 `done` |
 | `cancelled` | 只有 `cancelled` |
 | `missed` | 只有 `missed` |
-| `archived` | 只有已归档的想法 |
+| `archived` | 只有 `ideas`，且只含已归档的 |
 
 由此产生两条必须记住的规则：
 
 - **想法不会出现在默认查询里。** 想法的状态只有 `open` 和 `archived`，永不等于 `pending`。要看想法必须显式给 `--status all`、`--status open` 或 `--status archived`。
 - **回顾类问题必须换 `--status`。** 用户问“今天完成了什么”“这周做了哪些”，默认值会返回空的 `done`，必须用 `--status done` 或 `--status all`。生成日报前也要用 `--status all` 才能看到全貌。
 
+`--kind` 同样影响分区：`--kind task` 不会返回 `ideas`，`--kind idea` 只返回 `ideas`。
+
 想法的日期过滤也有一条约定：给了日期区间时按**想法的归属日**过滤，只返回该区间新增的想法；完全不给日期时不按日期过滤，返回全部匹配的想法。所以“我以前记过什么想法”要用不带日期的 `query --kind idea --status open`。
+
+### 分区只在被查询时出现
+
+**`data` 里出现某个分区，才说明本次查询了它；此时空数组才代表确实没有。没被查询的分区不会出现在 `data` 里。**
+
+因此默认查询不会返回 `done`、`cancelled`、`ideas`。这是刻意的：如果它们以空数组出现，就无法区分“今天没完成任何事”和“根本没查已完成”，很容易把后者误报成前者。
+
+返回值里的 `queried` 列出本次覆盖的分区，可以直接用来自检。
+
+```text
+# 默认 pending：queried 为 [missed, overdue, scheduled, undated]，data 里没有 done
+./tools/assis query --from 2026-08-05 --to 2026-08-05
+```
+
+所以判断“今天完成了什么”只有一条路：先用 `--status done` 或 `--status all` 查，再看 `done`。**绝不能因为默认查询里没有 `done` 就说用户今天没有进展。** 同理，`--no-include-overdue` 会让 `overdue` 整个缺席，那也不等于没有欠账。
 
 返回分区：
 
-- `records`：文本或 ID 定位结果；
+- `records`：文本或 ID 定位结果，只在 `lookup` 模式出现，此时其他分区全部缺席；
 - `scheduled`：区间内计划执行且未完成，含区间内已过期的项，这些项带`is_overdue: true`；
 - `overdue`：区间**之前**仍欠着的 `carry` 任务，即历史欠账；
 - `undated`：无日期开放任务；
