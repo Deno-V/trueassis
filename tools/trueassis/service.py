@@ -89,6 +89,7 @@ def create_task(args: Any) -> Dict[str, Any]:
         "schedule": schedule,
         "occurrences": [],
         "created_at": stamp,
+        "created_on": today().isoformat(),
         "updated_at": stamp,
         "completed_at": None,
         "completed_on": None,
@@ -97,7 +98,7 @@ def create_task(args: Any) -> Dict[str, Any]:
         "cancel_reason": None,
         "history": [_history("created")],
     }
-    path = record_path("task", record_id, stamp)
+    path = record_path("task", record_id, today().isoformat())
     body = f"# {data['title']}\n\n## 说明\n\n{(args.note or '').strip()}\n"
     save_record(path, data, body)
     return {"id": record_id, "path": str(path.relative_to(path.parents[3])), "record": data}
@@ -117,10 +118,11 @@ def create_idea(args: Any) -> Dict[str, Any]:
         "tags": parse_tags(args.tags),
         "status": "open",
         "created_at": stamp,
+        "created_on": today().isoformat(),
         "updated_at": stamp,
         "history": [_history("created")],
     }
-    path = record_path("idea", record_id, stamp)
+    path = record_path("idea", record_id, today().isoformat())
     body = f"# {data['title']}\n\n## 想法\n\n{(args.note or '').strip()}\n"
     save_record(path, data, body)
     return {"id": record_id, "record": data}
@@ -199,8 +201,10 @@ def query(args: Any) -> Dict[str, Any]:
             continue
         if data["kind"] == "idea":
             if status == "all" or status == data["status"]:
-                if not has_range or _in_range(data["created_at"], start, end):
-                    out["ideas"].append(_with_details({key: data.get(key) for key in ("id", "title", "category", "tags", "status", "created_at")}, body))
+                if not has_range or _in_range(_settled_on(data, "created"), start, end):
+                    idea_view = {key: data.get(key) for key in ("id", "title", "category", "tags", "status", "created_at")}
+                    idea_view["created_on"] = _settled_on(data, "created")
+                    out["ideas"].append(_with_details(idea_view, body))
             continue
 
         if data["schedule"]["type"] == "once":
@@ -215,18 +219,18 @@ def query(args: Any) -> Dict[str, Any]:
                 out["done"].append(view)
             elif data["status"] == "cancelled" and status in {"all", "cancelled"} and _in_range(_settled_on(data, "cancelled"), start, end):
                 out["cancelled"].append(view)
-            elif data["status"] == "open" and status in {"all", "pending", "open"}:
+            elif data["status"] == "open" and status in {"all", "pending", "open", "missed"}:
                 policy = data["schedule"]["overdue_policy"]
                 if due is None:
-                    if args.include_undated:
+                    if args.include_undated and status != "missed":
                         out["undated"].append(view)
                 elif start <= due <= end:
                     view["is_overdue"] = due < now
                     if due < now and policy == "skip":
                         out["missed"].append(view)
-                    else:
+                    elif status != "missed":
                         out["scheduled"].append(view)
-                elif due < debt_before and policy == "carry" and args.include_overdue:
+                elif due < debt_before and policy == "carry" and args.include_overdue and status != "missed":
                     view["is_overdue"] = True
                     out["overdue"].append(view)
             continue
@@ -281,7 +285,7 @@ def query(args: Any) -> Dict[str, Any]:
                     out["overdue"].append(view)
 
     for values in out.values():
-        values.sort(key=lambda item: (item.get("scheduled_date") or item.get("created_at") or "", item.get("title", "")))
+        values.sort(key=lambda item: (item.get("scheduled_date") or item.get("created_on") or item.get("created_at") or "", item.get("title", "")))
     return {"ok": True,
             "mode": "lookup" if direct_lookup else "range",
             "from": None if direct_lookup else start.isoformat(),

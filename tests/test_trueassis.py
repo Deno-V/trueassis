@@ -391,5 +391,75 @@ class TrueAssisTest(unittest.TestCase):
         self.assertEqual("04:00", result["day_start"])
 
 
+    def _mixed_fixture(self):
+        """造出覆盖各状态的数据，用于验证 --status 的默认与各取值语义。"""
+        done = self.service.create_task(self.ns(title="已完成", due="2026-08-04"))["id"]
+        self.service.update(self.update_args(done, "complete"))
+        cancelled = self.service.create_task(self.ns(title="已取消", due="2026-08-04"))["id"]
+        self.service.update(self.update_args(cancelled, "cancel", reason="不做了"))
+        self.service.create_task(self.ns(title="今天计划", due="2026-08-04"))
+        self.service.create_task(self.ns(title="carry欠账", due="2026-08-01"))
+        self.service.create_task(self.ns(title="无日期"))
+        idea = self.service.create_idea(self.ns(title="想法A"))["id"]
+        archived = self.service.create_idea(self.ns(title="想法B"))["id"]
+        self.service.update(self.update_args(archived, "archive"))
+        return idea, archived
+
+    def test_default_status_hides_done_cancelled_and_ideas(self):
+        self._mixed_fixture()
+        data = self.service.query(self.query_args())["data"]
+        self.assertEqual(["今天计划"], [row["title"] for row in data["scheduled"]])
+        self.assertEqual(["carry欠账"], [row["title"] for row in data["overdue"]])
+        self.assertEqual(["无日期"], [row["title"] for row in data["undated"]])
+        # 默认 pending 只回答「还欠着什么」，不回顾已完成，也不混入想法
+        self.assertEqual([], data["done"])
+        self.assertEqual([], data["cancelled"])
+        self.assertEqual([], data["ideas"])
+
+    def test_status_all_includes_done_cancelled_and_ideas(self):
+        self._mixed_fixture()
+        data = self.service.query(self.query_args(status="all"))["data"]
+        self.assertEqual(["已完成"], [row["title"] for row in data["done"]])
+        self.assertEqual(["已取消"], [row["title"] for row in data["cancelled"]])
+        self.assertEqual(["想法A", "想法B"], sorted(row["title"] for row in data["ideas"]))
+
+    def test_idea_status_open_and_archived_are_separable(self):
+        self._mixed_fixture()
+        opened = self.service.query(self.query_args(kind="idea", status="open"))["data"]["ideas"]
+        archived = self.service.query(self.query_args(kind="idea", status="archived"))["data"]["ideas"]
+        self.assertEqual(["想法A"], [row["title"] for row in opened])
+        self.assertEqual(["想法B"], [row["title"] for row in archived])
+
+    def test_status_missed_covers_once_tasks_too(self):
+        """skip 的一次性任务过期后也必须能被 --status missed 查到。"""
+        self.service.create_task(self.ns(title="一次性错过", due="2026-08-02", overdue_policy="skip"))
+        self.service.create_task(self.ns(title="循环错过", category="health", repeat="daily",
+            start="2026-08-02", until="2026-08-02", overdue_policy="skip"))
+        pending = self.service.query(self.query_args(from_="2026-08-02", to="2026-08-02"))["data"]["missed"]
+        only = self.service.query(self.query_args(from_="2026-08-02", to="2026-08-02", status="missed"))["data"]
+        self.assertEqual(["一次性错过", "循环错过"], sorted(row["title"] for row in pending))
+        # --status missed 必须与默认查询里的 missed 分区一致，不能漏掉一次性任务
+        self.assertEqual(sorted(row["title"] for row in pending), sorted(row["title"] for row in only["missed"]))
+        self.assertEqual([], only["scheduled"])
+
+    def test_idea_belongs_to_logical_day(self):
+        """想法的归属日走逻辑日，而不是墙钟日期，否则深夜记的想法会落错一天。"""
+        idea = self.service.create_idea(self.ns(title="深夜灵感"))["id"]
+        _, data, _ = self.storage.find_record(idea)
+        self.assertEqual("2026-08-04", data["created_on"])
+        rows = self.service.query(self.query_args(status="all", kind="idea"))["data"]["ideas"]
+        self.assertEqual(["2026-08-04"], [row["created_on"] for row in rows])
+
+    def test_legacy_idea_without_created_on_still_queryable(self):
+        """旧记录没有 created_on，应回退到 created_at 的日期部分。"""
+        idea = self.service.create_idea(self.ns(title="旧想法"))["id"]
+        path, data, body = self.storage.find_record(idea)
+        data.pop("created_on")
+        data["created_at"] = "2026-08-04T23:30:00+08:00"
+        self.storage.save_record(path, data, body)
+        rows = self.service.query(self.query_args(status="all", kind="idea"))["data"]["ideas"]
+        self.assertEqual(["旧想法"], [row["title"] for row in rows])
+
+
 if __name__ == "__main__":
     unittest.main()
