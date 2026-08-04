@@ -83,29 +83,37 @@
   [--kind all|task|idea]
   [--status all|pending|open|done|cancelled|missed|archived]
   [--category 分类] [--tag 标签] [--text 关键词] [--id 完整ID]
-  [--include-overdue] [--include-undated]
+  [--no-include-overdue] [--no-include-undated]
   [--overdue-days N]
 ```
 
-日期只给一端时视为查询单日。无日期且带 `--text` 或 `--id` 时返回匹配定义，用于定位完整 ID。
+日期只给一端时视为查询单日。完全不给日期时默认查询今天。无日期且带 `--text` 或 `--id` 时返回匹配定义，用于定位完整 ID，此时 `mode` 为 `lookup`。
+
+**逾期与无日期任务默认就会带出来**，不需要额外开关。只有在明确不想被它们干扰时才用 `--no-include-overdue`、`--no-include-undated` 关闭。
 
 返回分区：
 
 - `records`：文本或 ID 定位结果；
-- `scheduled`：区间内计划执行且未完成；
-- `overdue`：仍欠着的逾期任务；
+- `scheduled`：区间内计划执行且未完成，含区间内已过期的项，这些项带`is_overdue: true`；
+- `overdue`：区间**之前**仍欠着的 `carry` 任务，即历史欠账；
 - `undated`：无日期开放任务；
 - `done`：区间内完成；
 - `cancelled`：区间内取消；
-- `missed`：已错过的 `skip` 循环；
+- `missed`：区间内已错过且不必补做的 `skip` 循环；
 - `ideas`：想法。
+
+理解分区的关键：`scheduled` 回答“这段区间原本要做什么”，`overdue` 回答“这段区间之前还欠着什么”。因此查询历史区间时，当时未完成的任务留在 `scheduled` 并带 `is_overdue`，不会被错误地算成今天的欠账；查询未来区间时，尚未到期的任务也不会被误报为逾期。
+
+`missed` 必须主动汇报。`skip` 的意思是“不用补做”，不是“不用知道”。用户连续错过运动或阅读时要如实说出来，例如“这三天计划跑三次，实际一次没跑”。
+
+`--overdue-days` 限制循环 `carry` 向前追溯的天数，默认一年；一次性任务的欠账不受此限制。
 
 常用查询：
 
 ```text
-./tools/assis query --from today --to today --status pending --include-overdue --include-undated
-./tools/assis query --from tomorrow --to +3d --status pending
+./tools/assis query --from today --to +3d
 ./tools/assis query --from 2026-08-01 --to 2026-08-07 --status done
+./tools/assis query --from 2026-08-01 --to 2026-08-07 --status missed
 ./tools/assis query --kind idea --status open
 ./tools/assis query --kind idea --status archived
 ./tools/assis query --text "金融报告"
@@ -123,13 +131,42 @@
 - `cancel --reason 原因`：取消整个任务。
 - `reopen`：恢复整个任务。
 - `reschedule --to YYYY-MM-DD`：一次性任务改期。
-- `edit [--title 标题] [--category 分类] [--tags a,b]`：修改基本信息。
+- `edit`：修改或补充信息，不改变状态。见下方“补充信息”。
 - `edit-schedule --effective-from YYYY-MM-DD --repeat daily|weekly|monthly [--interval N] [--on ...] [--month-days ...] [--until ...]`：从指定日期起改用新循环规则，旧历史不变。
 - `cancel-series --effective-from YYYY-MM-DD --reason 原因`：从指定日期起终止后续循环。
 
 循环任务的某一次：在 `complete / cancel / reopen / reschedule` 后增加 `--occurrence YYYY-MM-DD`。这里必须使用规则产生的**原始日期**，即使该次已经改期。
 
 想法动作：`archive / restore / edit`。
+
+#### 事情发生在哪天：`--on-date`
+
+系统区分两种时间，理解这点才能正确记录过去的事：
+
+- **操作时刻**：系统何时记下这件事，自动记录，只用于审计。
+- **归属日期**：这件事真正发生在哪一天，决定它出现在哪份日报里。
+
+默认归属规则已经贴合说话习惯，多数情况不需要额外参数：
+
+- 循环任务的某一次：默认归属**这一次计划的那天**，因为 `--occurrence` 已经指明了。所以“我1 号那天跑了”直接用 `--occurrence 2026-08-01`，会正确记在 1 号。
+- 一次性任务：默认归属**今天**，因为没有别的线索说明它更早完成。
+
+只有当用户明确说“这件事其实是某天做的”而默认值不对时，才加 `--on-date YYYY-MM-DD`。典型场景是一次性任务的补记：用户今天才说“那份周报我1 号就交了”。
+
+#### 补充信息，不改变状态
+
+```text
+./tools/assis update<完整ID> --action edit
+  [--title 标题] [--category 分类]
+  [--add-tags a,b] [--tags a,b]
+  [--note 补充内容] [--replace-note 改写后的说明]
+```
+
+- `--note` **追加**一条带日期的补充，原有说明不动。用户随口补充的细节都用它。
+- `--replace-note` 才是改写原说明，只在用户明确要求纠正时使用。
+- `--add-tags` 追加标签；`--tags` 会**整组替换**，用户说“加个标签”时不要用它。
+- `--title` 会同时同步正文标题。
+- `edit` 必须带至少一项修改，否则报错，不会静默什么都不做。
 
 例：
 
@@ -138,7 +175,10 @@
 ./tools/assis update task-20260804-ab12cd34 --action reschedule --to 2026-08-10
 ./tools/assis update task-20260804-ab12cd34 --action cancel --reason "需求已撤销"
 ./tools/assis update task-20260804-ab12cd34 --action complete --occurrence 2026-08-05 --note "跑了5公里"
+./tools/assis update task-20260804-ab12cd34 --action complete --on-date 2026-08-01
 ./tools/assis update task-20260804-ab12cd34 --action reschedule --occurrence 2026-08-07 --to 2026-08-08 --note "周五出差"
+./tools/assis update task-20260804-ab12cd34 --action edit --note "客户改了验收标准"
+./tools/assis update task-20260804-ab12cd34 --action edit --add-tags urgent
 ./tools/assis update task-20260804-ab12cd34 --action edit-schedule --effective-from 2026-09-01 --repeat weekly --on tue,thu --until 2026-12-31
 ./tools/assis update idea-20260804-ab12cd34 --action archive
 ```
@@ -150,7 +190,9 @@
   [--summary 文本] [--reflection 文本] [--extra 任意内容]...
 ```
 
-工具自动汇总完成、取消、未完成、逾期和新增想法。用户的任何补充都可通过重复的 `--extra` 原样加入，不要限制用户只能回答固定模板。
+工具自动汇总完成、取消、计划内未完成、逾期未完成、错过未补、无日期待办和新增想法。用户的任何补充都可通过重复的 `--extra` 原样加入，不要限制用户只能回答固定模板。
+
+**同一天可以反复补写。** 自动汇总每次重算，用户亲手写的总结、复盘和自由补充只增不减，重复提交相同内容也不会堆叠。所以先生成骨架、之后再补细节是安全的。
 
 ```text
 ./tools/assis report daily --date 2026-08-04 --summary "完成主要合并工作" --reflection "下午切换任务太频繁" --extra "和同事讨论了新的评测方案" --extra "明早先推送分支"
@@ -168,7 +210,7 @@
    - 有哪些没有日期、但不应该被忘记的事？
 3. 用户回答后，自己判断分类、任务/idea、循环规则和 `carry/skip`，批量调用 `task`、`idea`；缺少关键日期时再集中追问一次。
 4. 询问是否安装每日系统提醒；用户同意后询问每天几点提醒，再执行根目录 `install-reminder`。
-5. 最后执行“今天 + 未来三天”查询，给用户第一份简报。
+5. 最后执行 `query --from today --to +3d`，给用户第一份简报。
 
 ## 5. 标准处理流程与例子
 
@@ -176,14 +218,15 @@
 
 ### “今天该做什么”
 
-必须连续执行两次：
+一条命令就够：
 
 ```text
-./tools/assis query --from today --to today --status pending --include-overdue --include-undated
-./tools/assis query --from tomorrow --to +3d --status pending
+./tools/assis query --from today --to +3d
 ```
 
-第一条覆盖逾期、今天和无日期任务；第二条发现未来三天的风险。汇报顺序：逾期承诺 → 今天计划 → 最多两条近期预告 → 无日期任务。当前行动建议最多三项，每项说明理由。
+逾期、今天、未来三天和无日期任务会一次返回。按 `scheduled_date` 区分今天与预告，不要把未来三天的事说成今天要做。
+
+汇报顺序：逾期承诺 → 今天计划 → 最多两条近期预告 → 无日期任务。若 `missed` 非空，补一句最近错过的情况。当前行动建议最多三项，每项说明理由。
 
 ### “报告下周一再交”
 
@@ -195,7 +238,7 @@
 ### “今天跑完了，5公里”
 
 ```text
-./tools/assis query --from today --to today --status pending --category health
+./tools/assis query --from today --to today --category health
 ./tools/assis update <完整ID> --action complete --occurrence <结果中的original_date> --note "5公里"
 ```
 
@@ -238,9 +281,34 @@
 
 先查询当天 `done / cancelled / pending`，向用户确认遗漏，再生成日报。用户随口补充的见闻、进展、情绪或明日计划全部使用 `--extra` 写入，不能只保留工具自动汇总。
 
+### “前几天的日报忘了写”
+
+补写过去的日期是被支持的，但要先把那几天真正发生的事补记回去，否则日报只反映今天的状态。顺序是：
+
+1. 查询那一天，看工具已经知道什么：
+
+   ```text
+   ./tools/assis query --from 2026-08-01 --to 2026-08-01 --status all
+   ```
+
+2. 问用户那天实际完成了什么，然后逐条补记。这一步最关键：**归属日期必须落在那天**。循环任务用 `--occurrence` 即可自动归属，一次性任务如果确实是那天完成的，要加 `--on-date`。
+3. 最后生成那天的日报。已经存在的日报可以安全地再写一次，用户之前手写的内容不会丢。
+
+“昨天我其实跑了步，只是忘了说”属于补记，不是今天的成果，不要记在今天。
+
+### “这个任务我补充点信息”
+
+用 `edit --note` 追加，不要动状态，也不要覆盖原有说明。补充完只回一句确认，不要把整条记录念给用户。
+
+```text
+./tools/assis query --text "关键词"
+./tools/assis update <唯一完整ID> --action edit --note "用户补充的内容"
+```
+
 ## 6. 隐私与安全
 
 - `private/` 存全部个人数据，禁止加入公共 Git 远端。
 - 禁止创建删除接口，禁止手动删除任务和想法。
+- 每一次改动都会写入 `history`，包含动作、时刻与变更前后的值；不要绕过工具直接改文件，否则这条轨迹会断。
 - 工具使用参数绑定式解析、字段校验与原子替换；不要绕过工具。
 - 命令失败时如实说明，不得伪造成功。

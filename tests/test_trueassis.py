@@ -40,14 +40,15 @@ class TrueAssisTest(unittest.TestCase):
     def query_args(self, **values):
         defaults = dict(from_="2026-08-04", to="2026-08-04", kind="all", status="pending",
                         category=None, tag=None, text=None, id=None, include_overdue=True,
-                        include_undated=True, overdue_days=3660)
+                        include_undated=True, overdue_days=365)
         defaults.update(values)
         return argparse.Namespace(**defaults)
 
     def update_args(self, record_id, action, **values):
         defaults = dict(id=record_id, action=action, occurrence=None, to=None, reason=None,
                         note=None, title=None, category=None, tags=None, effective_from=None,
-                        repeat=None, interval=1, on=None, month_days=None, until=None)
+                        repeat=None, interval=1, on=None, month_days=None, until=None,
+                        on_date=None, add_tags=None, replace_note=None)
         defaults.update(values)
         return argparse.Namespace(**defaults)
 
@@ -176,6 +177,177 @@ class TrueAssisTest(unittest.TestCase):
         self.assertIn('"title": "人类可读"', text)
         self.assertIn("# 人类可读", text)
         self.assertIn("详细说明", text)
+
+    def test_bare_query_defaults_to_today_and_reports_range(self):
+        self.service.create_task(self.ns(title="欠着的报告", due="2026-08-01"))
+        self.service.create_task(self.ns(title="无期限体检", category="health"))
+        result = self.service.query(self.query_args(from_=None, to=None))
+        self.assertEqual("range", result["mode"])
+        self.assertEqual("2026-08-04", result["from"])
+        self.assertEqual("2026-08-04", result["to"])
+        self.assertEqual(["欠着的报告"], [row["title"] for row in result["data"]["overdue"]])
+        self.assertEqual(["无期限体检"], [row["title"] for row in result["data"]["undated"]])
+
+    def test_include_flags_can_be_turned_off(self):
+        self.service.create_task(self.ns(title="欠着的报告", due="2026-08-01"))
+        self.service.create_task(self.ns(title="无期限体检", category="health"))
+        result = self.service.query(self.query_args(include_overdue=False, include_undated=False))
+        self.assertEqual([], result["data"]["overdue"])
+        self.assertEqual([], result["data"]["undated"])
+
+    def test_historical_range_keeps_plan_in_scheduled(self):
+        self.service.create_task(self.ns(title="上周的报告", due="2026-08-02"))
+        result = self.service.query(self.query_args(from_="2026-08-01", to="2026-08-03"))
+        rows = result["data"]["scheduled"]
+        self.assertEqual(["上周的报告"], [row["title"] for row in rows])
+        self.assertTrue(rows[0]["is_overdue"])
+        self.assertEqual([], result["data"]["overdue"])
+
+    def test_missed_skip_is_visible_in_default_pending_query(self):
+        self.service.create_task(self.ns(title="跑步", category="health", repeat="daily",
+                                         start="2026-08-01", overdue_policy="skip"))
+        result = self.service.query(self.query_args(from_="2026-08-01", to="2026-08-03"))
+        self.assertEqual(3, len(result["data"]["missed"]))
+        self.assertEqual([], result["data"]["scheduled"])
+        self.assertEqual([], result["data"]["overdue"])
+
+    def test_future_range_does_not_mislabel_unreached_tasks(self):
+        self.service.create_task(self.ns(title="真逾期", due="2026-08-01"))
+        self.service.create_task(self.ns(title="还没到期", due="2026-08-06"))
+        result = self.service.query(self.query_args(from_="2026-08-10", to="2026-08-12"))
+        self.assertEqual(["真逾期"], [row["title"] for row in result["data"]["overdue"]])
+        self.assertEqual([], result["data"]["scheduled"])
+
+    def test_idea_lookup_without_range_is_not_limited_to_today(self):
+        idea = self.service.create_idea(self.ns(title="旧想法", category="entertainment"))
+        path, data, body = self.storage.find_record(idea["id"])
+        data["created_at"] = "2026-05-01T09:00:00+08:00"
+        self.storage.save_record(path, data, body)
+        result = self.service.query(self.query_args(from_=None, to=None, kind="idea", status="open"))
+        self.assertEqual([idea["id"]], [row["id"] for row in result["data"]["ideas"]])
+
+    def test_report_separates_overdue_missed_and_plan(self):
+        self.service.create_task(self.ns(title="跑步", category="health", repeat="daily",
+                                         start="2026-08-01", overdue_policy="skip"))
+        self.service.create_task(self.ns(title="欠着的报告", due="2026-08-01"))
+        result = self.report.generate_report(argparse.Namespace(
+            period="daily", date="2026-08-03", summary=None, reflection=None, extra=None))
+        text = Path(result["path"]).read_text(encoding="utf-8")
+        self.assertIn("## 错过未补", text)
+        self.assertIn("## 逾期未完成", text)
+        self.assertIn("## 无日期待办", text)
+        missed_block = text.split("## 错过未补")[1].split("##")[0]
+        self.assertIn("跑步", missed_block)
+        overdue_block = text.split("## 逾期未完成")[1].split("##")[0]
+        self.assertIn("欠着的报告", overdue_block)
+
+    def test_overdue_days_limits_carry_lookback(self):
+        self.service.create_task(self.ns(title="长期欠账", repeat="daily", start="2026-01-01",
+                                         overdue_policy="carry"))
+        wide = self.service.query(self.query_args(overdue_days=365))
+        narrow = self.service.query(self.query_args(overdue_days=3))
+        self.assertGreater(len(wide["data"]["overdue"]), len(narrow["data"]["overdue"]))
+        self.assertEqual(3, len(narrow["data"]["overdue"]))
+
+    def test_backfilled_occurrence_lands_on_its_planned_day(self):
+        task = self.service.create_task(self.ns(title="跑步", category="health", repeat="daily",
+                                                start="2026-08-01", overdue_policy="skip"))
+        # 8月4日才补记“我1号跑了”，这件事应该算在 1号，而不是操作当天。
+        self.service.update(self.update_args(task["id"], "complete", occurrence="2026-08-01", note="5公里"))
+        first = self.service.query(self.query_args(from_="2026-08-01", to="2026-08-01", status="all"))
+        self.assertEqual(["跑步"], [row["title"] for row in first["data"]["done"]])
+        self.assertEqual("2026-08-01", first["data"]["done"][0]["completed_on"])
+        self.assertEqual([], first["data"]["missed"])
+        today_view = self.service.query(self.query_args(status="done"))
+        self.assertEqual([], today_view["data"]["done"])
+
+    def test_once_task_completion_defaults_to_today(self):
+        task = self.service.create_task(self.ns(title="交周报", due="2026-08-01"))
+        self.service.update(self.update_args(task["id"], "complete"))
+        _, data, _ = self.storage.find_record(task["id"])
+        self.assertEqual("2026-08-04", data["completed_on"])
+        late = self.service.query(self.query_args(status="done"))
+        self.assertEqual(["交周报"], [row["title"] for row in late["data"]["done"]])
+
+    def test_on_date_backfills_once_task(self):
+        task = self.service.create_task(self.ns(title="交周报", due="2026-08-01"))
+        self.service.update(self.update_args(task["id"], "complete", on_date="2026-08-01"))
+        result = self.service.query(self.query_args(from_="2026-08-01", to="2026-08-01", status="done"))
+        self.assertEqual(["交周报"], [row["title"] for row in result["data"]["done"]])
+
+    def test_legacy_record_without_on_field_still_groups(self):
+        task = self.service.create_task(self.ns(title="老记录", due="2026-08-01"))
+        self.service.update(self.update_args(task["id"], "complete"))
+        path, data, body = self.storage.find_record(task["id"])
+        data.pop("completed_on")
+        data["completed_at"] = "2026-08-02T10:00:00+08:00"
+        self.storage.save_record(path, data, body)
+        result = self.service.query(self.query_args(from_="2026-08-02", to="2026-08-02", status="done"))
+        self.assertEqual(["老记录"], [row["title"] for row in result["data"]["done"]])
+
+    def test_edit_appends_supplement_without_losing_description(self):
+        task = self.service.create_task(self.ns(title="任务", due="2026-08-04", note="最初的说明"))
+        self.service.update(self.update_args(task["id"], "edit", note="客户改了验收标准"))
+        self.service.update(self.update_args(task["id"], "edit", note="需要法务复核"))
+        path, _, _ = self.storage.find_record(task["id"])
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("最初的说明", text)
+        self.assertIn("- 2026-08-04：客户改了验收标准", text)
+        self.assertIn("- 2026-08-04：需要法务复核", text)
+
+    def test_edit_add_tags_keeps_existing_and_records_change(self):
+        task = self.service.create_task(self.ns(title="任务", due="2026-08-04", tags="a,b"))
+        self.service.update(self.update_args(task["id"], "edit", add_tags="urgent"))
+        _, data, _ = self.storage.find_record(task["id"])
+        self.assertEqual(["a", "b", "urgent"], data["tags"])
+        change = data["history"][-1]["changes"]["tags"]
+        self.assertEqual(["a", "b"], change["from"])
+        self.assertEqual(["a", "b", "urgent"], change["to"])
+
+    def test_edit_title_syncs_body_heading(self):
+        task = self.service.create_task(self.ns(title="原始标题", due="2026-08-04"))
+        self.service.update(self.update_args(task["id"], "edit", title="改后的标题"))
+        path, _, _ = self.storage.find_record(task["id"])
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("# 改后的标题", text)
+        self.assertNotIn("# 原始标题", text)
+
+    def test_edit_without_any_change_fails_loudly(self):
+        task = self.service.create_task(self.ns(title="任务", due="2026-08-04"))
+        with self.assertRaisesRegex(ValueError, "至少一项修改"):
+            self.service.update(self.update_args(task["id"], "edit"))
+
+    def test_reschedule_records_original_date(self):
+        task = self.service.create_task(self.ns(title="任务", due="2026-08-01"))
+        self.service.update(self.update_args(task["id"], "reschedule", to="2026-08-20"))
+        _, data, _ = self.storage.find_record(task["id"])
+        entry = data["history"][-1]
+        self.assertEqual("2026-08-01", entry["from"])
+        self.assertEqual("2026-08-20", entry["to"])
+
+    def test_report_rewrite_keeps_handwritten_content(self):
+        self.service.create_task(self.ns(title="交周报", due="2026-08-01"))
+        first = argparse.Namespace(period="daily", date="2026-08-01", summary="那天在赶周报",
+                                   reflection="节奏太紧", extra=["和同事吃了饭"])
+        result = self.report.generate_report(first)
+        self.assertFalse(result["rewritten"])
+        again = self.report.generate_report(argparse.Namespace(
+            period="daily", date="2026-08-01", summary=None, reflection=None, extra=None))
+        self.assertTrue(again["rewritten"])
+        text = Path(again["path"]).read_text(encoding="utf-8")
+        self.assertIn("那天在赶周报", text)
+        self.assertIn("节奏太紧", text)
+        self.assertIn("和同事吃了饭", text)
+
+    def test_report_appends_new_notes_and_stays_idempotent(self):
+        path_holder = self.report.generate_report(argparse.Namespace(
+            period="daily", date="2026-08-01", summary="第一句", reflection=None, extra=None))
+        for _ in range(2):
+            self.report.generate_report(argparse.Namespace(
+                period="daily", date="2026-08-01", summary="第二句", reflection=None, extra=None))
+        text = Path(path_holder["path"]).read_text(encoding="utf-8")
+        self.assertIn("第一句", text)
+        self.assertEqual(1, text.count("第二句"))
 
 
 if __name__ == "__main__":

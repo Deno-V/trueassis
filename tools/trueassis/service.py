@@ -15,6 +15,23 @@ def _history(action: str, **details: Any) -> Dict[str, Any]:
     return value
 
 
+# 全系统只有两种时间：
+#   *_at 是系统记录这件事的时刻，只用于审计，永不参与归属判断；
+#   *_on 是这件事真正发生的那一天，所有查询与报告都按它归档。
+# 补记时两者必然分离，例如 8 月 4 日才说“我 1 号跑了”。
+def _settle_on(args: Any, anchor: date) -> str:
+    value = parse_date(getattr(args, "on_date", None))
+    return (value or anchor).isoformat()
+
+
+def _settled_on(value: Dict[str, Any], key: str) -> Optional[str]:
+    direct = value.get(f"{key}_on")
+    if direct:
+        return direct
+    stamp = value.get(f"{key}_at")
+    return stamp[:10] if stamp else None
+
+
 def create_task(args: Any) -> Dict[str, Any]:
     stamp = now_iso()
     record_id = new_id("task")
@@ -57,7 +74,9 @@ def create_task(args: Any) -> Dict[str, Any]:
         "created_at": stamp,
         "updated_at": stamp,
         "completed_at": None,
+        "completed_on": None,
         "cancelled_at": None,
+        "cancelled_on": None,
         "cancel_reason": None,
         "history": [_history("created")],
     }
@@ -105,7 +124,8 @@ def _occurrence_view(task: Dict[str, Any], original: date, override: Optional[Di
         scheduled = date.fromisoformat(override.get("scheduled_date") or original.isoformat())
         state = override.get("status", "pending")
         result.update({key: override.get(key) for key in
-                       ("completed_at", "cancelled_at", "reason", "note") if override.get(key) is not None})
+                       ("completed_at", "completed_on", "cancelled_at", "cancelled_on", "reason", "note")
+                       if override.get(key) is not None})
     result.update({
         "id": task["id"], "title": task["title"], "kind": "occurrence",
         "category": task["category"], "tags": task.get("tags", []),
@@ -137,10 +157,17 @@ def query(args: Any) -> Dict[str, Any]:
     if start and end and start > end:
         raise ValueError("from 不能晚于 to")
     status = args.status
-    direct_lookup = bool(args.text or args.id) and start is None and end is None
+    has_range = start is not None
+    direct_lookup = bool(args.text or args.id) and not has_range
+    if not has_range:
+        start = end = today()
+    now = today()
+    # 债务边界：只有早于区间起点、同时确实已过今天的欠账才算逾期。
+    # 查询未来区间时，今天到区间之间的任务尚未到期，不应被称为逾期。
+    debt_before = min(start, now)
     out: Dict[str, list] = {"records": [], "scheduled": [], "overdue": [], "undated": [], "done": [], "cancelled": [], "missed": [], "ideas": []}
-    scan_start = start or today()
-    scan_end = end or scan_start
+    scan_start = start
+    scan_end = end
 
     for _, data, body in iter_records(args.kind):
         if not _matching(data, body, args):
@@ -155,7 +182,7 @@ def query(args: Any) -> Dict[str, Any]:
             continue
         if data["kind"] == "idea":
             if status == "all" or status == data["status"]:
-                if start is None or _in_range(data["created_at"], start, end):
+                if not has_range or _in_range(data["created_at"], start, end):
                     out["ideas"].append({key: data.get(key) for key in ("id", "title", "category", "tags", "status", "created_at")})
             continue
 
@@ -164,27 +191,34 @@ def query(args: Any) -> Dict[str, Any]:
             due = date.fromisoformat(due_raw) if due_raw else None
             view = {"id": data["id"], "title": data["title"], "kind": "task", "category": data["category"],
                     "tags": data.get("tags", []), "status": data["status"], "scheduled_date": due_raw,
-                    "completed_at": data.get("completed_at"), "cancelled_at": data.get("cancelled_at"),
+                    "completed_at": data.get("completed_at"), "completed_on": _settled_on(data, "completed"),
+                    "cancelled_at": data.get("cancelled_at"), "cancelled_on": _settled_on(data, "cancelled"),
                     "cancel_reason": data.get("cancel_reason")}
-            if data["status"] == "done" and status in {"all", "done"} and _in_range(data.get("completed_at"), start, end):
+            if data["status"] == "done" and status in {"all", "done"} and _in_range(_settled_on(data, "completed"), start, end):
                 out["done"].append(view)
-            elif data["status"] == "cancelled" and status in {"all", "cancelled"} and _in_range(data.get("cancelled_at"), start, end):
+            elif data["status"] == "cancelled" and status in {"all", "cancelled"} and _in_range(_settled_on(data, "cancelled"), start, end):
                 out["cancelled"].append(view)
             elif data["status"] == "open" and status in {"all", "pending", "open"}:
-                if due is None and args.include_undated:
-                    out["undated"].append(view)
-                elif due and due < today() and data["schedule"]["overdue_policy"] == "carry":
-                    if (start and end and start <= due <= end) or (args.include_overdue and start and due < start):
-                        out["overdue"].append(view)
-                elif due and start and end and start <= due <= end:
-                    out["scheduled"].append(view)
+                policy = data["schedule"]["overdue_policy"]
+                if due is None:
+                    if args.include_undated:
+                        out["undated"].append(view)
+                elif start <= due <= end:
+                    view["is_overdue"] = due < now
+                    if due < now and policy == "skip":
+                        out["missed"].append(view)
+                    else:
+                        out["scheduled"].append(view)
+                elif due < debt_before and policy == "carry" and args.include_overdue:
+                    view["is_overdue"] = True
+                    out["overdue"].append(view)
             continue
 
         if data["status"] in {"done", "cancelled"}:
-            closed_at = data.get("completed_at") if data["status"] == "done" else data.get("cancelled_at")
-            if status in {"all", data["status"]} and _in_range(closed_at, start, end):
+            closed_on = _settled_on(data, "completed" if data["status"] == "done" else "cancelled")
+            if status in {"all", data["status"]} and _in_range(closed_on, start, end):
                 out[data["status"]].append({"id": data["id"], "title": data["title"], "kind": "task-series",
-                                             "category": data["category"], "status": data["status"], "at": closed_at})
+                                             "category": data["category"], "status": data["status"], "on": closed_on})
             continue
 
         generated: Dict[str, Dict[str, Any]] = {}
@@ -196,40 +230,50 @@ def query(args: Any) -> Dict[str, Any]:
             original = date.fromisoformat(occurrence["original_date"])
             scheduled = date.fromisoformat(occurrence.get("scheduled_date") or occurrence["original_date"])
             state = occurrence.get("status", "pending")
-            if state == "done" and status in {"all", "done"} and _in_range(occurrence.get("completed_at"), start, end):
+            if state == "done" and status in {"all", "done"} and _in_range(_settled_on(occurrence, "completed"), start, end):
                 out["done"].append(_occurrence_view(data, original, occurrence))
-            elif state == "cancelled" and status in {"all", "cancelled"} and _in_range(occurrence.get("cancelled_at"), start, end):
+            elif state == "cancelled" and status in {"all", "cancelled"} and _in_range(_settled_on(occurrence, "cancelled"), start, end):
                 out["cancelled"].append(_occurrence_view(data, original, occurrence))
-            elif state == "pending" and status in {"all", "pending", "open"} and start and end and start <= scheduled <= end:
+            elif state == "pending" and status in {"all", "pending", "open"} and start <= scheduled <= end:
                 generated[original.isoformat()] = _occurrence_view(data, original, occurrence)
 
+        policy = data["schedule"]["overdue_policy"]
         if status in {"all", "pending", "open", "missed"}:
             for view in generated.values():
-                scheduled = date.fromisoformat(view["scheduled_date"])
                 if view["status"] != "pending":
                     continue
-                policy = data["schedule"]["overdue_policy"]
-                if scheduled < today():
-                    if policy == "carry" and status in {"all", "pending", "open"}:
-                        out["overdue"].append(view)
-                    elif policy == "skip" and status in {"all", "missed"}:
-                        out["missed"].append(view)
-                elif start and end and start <= scheduled <= end and status in {"all", "pending", "open"}:
+                scheduled = date.fromisoformat(view["scheduled_date"])
+                if not start <= scheduled <= end:
+                    continue
+                view["is_overdue"] = scheduled < now
+                if scheduled < now and policy == "skip":
+                    out["missed"].append(view)
+                elif status in {"all", "pending", "open"}:
                     out["scheduled"].append(view)
 
-        if args.include_overdue and status in {"all", "pending", "open"} and start:
-            carry_start = max(_first_schedule_date(data), start - timedelta(days=args.overdue_days))
-            for original in occurrence_dates(data, carry_start, start - timedelta(days=1)):
-                override = occurrence_override(data, original)
-                view = _occurrence_view(data, original, override)
-                if view["status"] == "pending" and date.fromisoformat(view["scheduled_date"]) < start:
-                    if data["schedule"]["overdue_policy"] == "carry":
-                        out["overdue"].append(view)
+        if args.include_overdue and policy == "carry" and status in {"all", "pending", "open"}:
+            horizon = start - timedelta(days=max(args.overdue_days, 0))
+            carry_start = max(_first_schedule_date(data), horizon)
+            for original in occurrence_dates(data, carry_start, debt_before - timedelta(days=1)):
+                view = _occurrence_view(data, original, occurrence_override(data, original))
+                scheduled = date.fromisoformat(view["scheduled_date"])
+                if view["status"] != "pending" or start <= scheduled <= end:
+                    continue
+                if scheduled < debt_before:
+                    view["is_overdue"] = True
+                    out["overdue"].append(view)
 
     for values in out.values():
         values.sort(key=lambda item: (item.get("scheduled_date") or item.get("created_at") or "", item.get("title", "")))
-    return {"ok": True, "from": start.isoformat() if start else None, "to": end.isoformat() if end else None,
-            "filters": {"kind": args.kind, "status": status, "category": args.category, "tag": args.tag}, "data": out}
+    return {"ok": True,
+            "mode": "lookup" if direct_lookup else "range",
+            "from": None if direct_lookup else start.isoformat(),
+            "to": None if direct_lookup else end.isoformat(),
+            "filters": {"kind": args.kind, "status": status, "category": args.category, "tag": args.tag,
+                        "include_overdue": bool(args.include_overdue),
+                        "include_undated": bool(args.include_undated),
+                        "overdue_days": args.overdue_days},
+            "data": out}
 
 
 def _first_schedule_date(task: Dict[str, Any]) -> date:
@@ -243,6 +287,7 @@ def update(args: Any) -> Dict[str, Any]:
     path, data, body = find_record(args.id)
     stamp = now_iso()
     action = args.action
+    detail: Dict[str, Any] = {}
     if data["kind"] == "idea":
         if action not in {"archive", "restore", "edit"}:
             raise ValueError("idea 仅支持 archive、restore、edit")
@@ -251,11 +296,11 @@ def update(args: Any) -> Dict[str, Any]:
         elif action == "restore":
             data["status"] = "open"
         else:
-            _edit_common(data, args)
-        data["history"].append(_history(action))
+            body, detail["changes"] = _edit_common(data, body, args)
+        data["history"].append(_history(action, **detail))
         data["updated_at"] = stamp
         save_record(path, data, body)
-        return {"ok": True, "id": data["id"], "action": action}
+        return {"ok": True, "id": data["id"], "action": action, **_echo(detail)}
 
     occurrence_date = parse_date(args.occurrence) if args.occurrence else None
     if occurrence_date:
@@ -263,61 +308,169 @@ def update(args: Any) -> Dict[str, Any]:
             raise ValueError("--occurrence 仅适用于循环任务")
         if not is_scheduled(data, occurrence_date):
             raise ValueError(f"{occurrence_date} 不是该循环任务的原始发生日期")
-        _update_occurrence(data, occurrence_date, action, args, stamp)
+        detail["occurrence"] = occurrence_date.isoformat()
+        detail.update(_update_occurrence(data, occurrence_date, action, args, stamp))
     elif action == "complete":
-        data.update({"status": "done", "completed_at": stamp})
+        # 一次性任务默认记在今天：没有别的线索说明它在更早的哪天完成。
+        settled = _settle_on(args, today())
+        data.update({"status": "done", "completed_at": stamp, "completed_on": settled,
+                     "cancelled_at": None, "cancelled_on": None, "cancel_reason": None})
+        detail["on"] = settled
     elif action == "cancel":
         if not args.reason:
             raise ValueError("取消任务必须提供 --reason")
-        data.update({"status": "cancelled", "cancelled_at": stamp, "cancel_reason": args.reason})
+        settled = _settle_on(args, today())
+        data.update({"status": "cancelled", "cancelled_at": stamp, "cancelled_on": settled,
+                     "cancel_reason": args.reason})
+        detail.update({"on": settled, "reason": args.reason})
     elif action == "reopen":
-        data.update({"status": "open", "completed_at": None, "cancelled_at": None, "cancel_reason": None})
+        data.update({"status": "open", "completed_at": None, "completed_on": None,
+                     "cancelled_at": None, "cancelled_on": None, "cancel_reason": None})
     elif action == "reschedule":
         if data["schedule"]["type"] != "once":
             raise ValueError("修改某次循环请同时提供 --occurrence")
-        data["schedule"]["due"] = parse_date(args.to, required=True).isoformat()
+        moved_to = parse_date(args.to, required=True).isoformat()
+        detail["from"] = data["schedule"].get("due")
+        detail["to"] = moved_to
+        data["schedule"]["due"] = moved_to
     elif action == "edit":
-        _edit_common(data, args)
+        body, detail["changes"] = _edit_common(data, body, args)
     elif action == "edit-schedule":
         _edit_schedule(data, args, stamp)
+        detail.update({"effective_from": parse_date(args.effective_from, required=True).isoformat(),
+                       "repeat": args.repeat, "interval": args.interval, "weekdays": args.on,
+                       "month_days": args.month_days, "until": args.until})
     elif action == "cancel-series":
         if data["schedule"]["type"] != "recurring":
             raise ValueError("cancel-series 仅适用于循环任务")
         if not args.reason:
             raise ValueError("取消后续循环必须提供 --reason")
-        data["schedule"]["cancelled_from"] = parse_date(args.effective_from or "today", required=True).isoformat()
+        effective = parse_date(args.effective_from or "today", required=True).isoformat()
+        data["schedule"]["cancelled_from"] = effective
+        detail.update({"effective_from": effective, "reason": args.reason})
     else:
         raise ValueError(f"不支持的 action：{action}")
     data["updated_at"] = stamp
-    data["history"].append(_history(action, occurrence=args.occurrence, reason=args.reason, to=args.to))
+    data["history"].append(_history(action, **detail))
     save_record(path, data, body)
-    return {"ok": True, "id": data["id"], "action": action}
+    return {"ok": True, "id": data["id"], "action": action, **_echo(detail)}
 
 
-def _edit_common(data: Dict[str, Any], args: Any) -> None:
+def _echo(detail: Dict[str, Any]) -> Dict[str, Any]:
+    return {key: detail[key] for key in ("on", "occurrence", "changes") if detail.get(key) is not None}
+
+
+DESCRIPTION_HEADINGS = ("## 说明", "## 想法")
+SUPPLEMENT_HEADING = "## 补充"
+
+
+def _section_bounds(lines: list, heading: str) -> Optional[tuple]:
+    for index, line in enumerate(lines):
+        if line.strip() == heading:
+            end = len(lines)
+            for cursor in range(index + 1, len(lines)):
+                if lines[cursor].startswith("## "):
+                    end = cursor
+                    break
+            return index, end
+    return None
+
+
+def _retitle(body: str, title: str) -> str:
+    lines = body.splitlines()
+    for index, line in enumerate(lines):
+        if line.startswith("# "):
+            lines[index] = f"# {title}"
+            return "\n".join(lines) + "\n"
+    return f"# {title}\n\n{body.lstrip()}"
+
+
+def _append_note(body: str, text: str, on: str) -> str:
+    entry = f"- {on}：{text.strip()}"
+    lines = body.rstrip().splitlines()
+    bounds = _section_bounds(lines, SUPPLEMENT_HEADING)
+    if bounds is None:
+        return "\n".join(lines) + f"\n\n{SUPPLEMENT_HEADING}\n\n{entry}\n"
+    start, end = bounds
+    block = lines[start:end]
+    while block and not block[-1].strip():
+        block.pop()
+    return "\n".join(lines[:start] + block + [entry] + lines[end:]) + "\n"
+
+
+def _replace_description(body: str, text: str) -> str:
+    lines = body.rstrip().splitlines()
+    for heading in DESCRIPTION_HEADINGS:
+        bounds = _section_bounds(lines, heading)
+        if bounds is None:
+            continue
+        start, end = bounds
+        rebuilt = lines[:start] + [heading, "", text.strip(), ""] + lines[end:]
+        return "\n".join(rebuilt).rstrip() + "\n"
+    return "\n".join(lines) + f"\n\n{DESCRIPTION_HEADINGS[0]}\n\n{text.strip()}\n"
+
+
+def _edit_common(args_data: Dict[str, Any], body: str, args: Any) -> tuple:
+    data, changes = args_data, {}
     if args.title:
-        data["title"] = args.title.strip()
+        value = args.title.strip()
+        if value != data["title"]:
+            changes["title"] = {"from": data["title"], "to": value}
+            body = _retitle(body, value)
+            data["title"] = value
     if args.category:
         if args.category not in CATEGORIES:
             raise ValueError(f"未知分类：{args.category}")
-        data["category"] = args.category
+        if args.category != data["category"]:
+            changes["category"] = {"from": data["category"], "to": args.category}
+            data["category"] = args.category
     if args.tags is not None:
-        data["tags"] = parse_tags(args.tags)
+        value = parse_tags(args.tags)
+        if value != data["tags"]:
+            changes["tags"] = {"from": list(data["tags"]), "to": value}
+            data["tags"] = value
+    if getattr(args, "add_tags", None):
+        merged = list(dict.fromkeys(list(data["tags"]) + parse_tags(args.add_tags)))
+        if merged != data["tags"]:
+            changes["tags"] = {"from": list(data["tags"]), "to": merged}
+            data["tags"] = merged
+    if getattr(args, "replace_note", None):
+        body = _replace_description(body, args.replace_note)
+        changes["description"] = "replaced"
+    if args.note:
+        settled = _settle_on(args, today())
+        body = _append_note(body, args.note, settled)
+        changes["supplement"] = settled
+    if not changes:
+        raise ValueError("edit 需要至少一项修改：--title / --category / --tags / --add-tags / --note / --replace-note")
+    return body, changes
 
 
-def _update_occurrence(data: Dict[str, Any], original: date, action: str, args: Any, stamp: str) -> None:
+def _update_occurrence(data: Dict[str, Any], original: date, action: str, args: Any, stamp: str) -> Dict[str, Any]:
     current = occurrence_override(data, original)
     value = dict(current) if current else {"original_date": original.isoformat(), "scheduled_date": original.isoformat(), "status": "pending"}
+    detail: Dict[str, Any] = {}
+    # 这一次原本安排在哪天，就是它默认归属的那天；用户已经用 --occurrence 指明了。
+    anchor = date.fromisoformat(value.get("scheduled_date") or original.isoformat())
     if action == "complete":
-        value.update({"status": "done", "completed_at": stamp, "cancelled_at": None, "reason": None})
+        settled = _settle_on(args, anchor)
+        value.update({"status": "done", "completed_at": stamp, "completed_on": settled,
+                      "cancelled_at": None, "cancelled_on": None, "reason": None})
+        detail["on"] = settled
     elif action == "cancel":
         if not args.reason:
             raise ValueError("取消某次循环必须提供 --reason")
-        value.update({"status": "cancelled", "cancelled_at": stamp, "reason": args.reason})
+        settled = _settle_on(args, anchor)
+        value.update({"status": "cancelled", "cancelled_at": stamp, "cancelled_on": settled,
+                      "reason": args.reason})
+        detail.update({"on": settled, "reason": args.reason})
     elif action == "reopen":
-        value.update({"status": "pending", "completed_at": None, "cancelled_at": None, "reason": None})
+        value.update({"status": "pending", "completed_at": None, "completed_on": None,
+                      "cancelled_at": None, "cancelled_on": None, "reason": None})
     elif action == "reschedule":
-        value.update({"status": "pending", "scheduled_date": parse_date(args.to, required=True).isoformat()})
+        moved_to = parse_date(args.to, required=True).isoformat()
+        detail.update({"from": value.get("scheduled_date"), "to": moved_to})
+        value.update({"status": "pending", "scheduled_date": moved_to})
     else:
         raise ValueError("带 --occurrence 时仅支持 complete、cancel、reopen、reschedule")
     if args.note:
@@ -325,6 +478,7 @@ def _update_occurrence(data: Dict[str, Any], original: date, action: str, args: 
     value["updated_at"] = stamp
     data["occurrences"] = [item for item in data["occurrences"] if item.get("original_date") != original.isoformat()]
     data["occurrences"].append(value)
+    return detail
 
 
 def _edit_schedule(data: Dict[str, Any], args: Any, stamp: str) -> None:

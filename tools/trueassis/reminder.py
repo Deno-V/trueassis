@@ -19,7 +19,6 @@ def query_upcoming() -> Dict[str, Any]:
     command = [
         sys.executable, str(PROJECT_ROOT / "tools" / "assis"), "query",
         "--from", "today", "--to", "+3d", "--status", "pending",
-        "--include-overdue", "--include-undated",
     ]
     result = subprocess.run(command, cwd=str(PROJECT_ROOT), capture_output=True, text=True, timeout=60)
     if result.returncode != 0:
@@ -34,6 +33,7 @@ def build_message(data: Dict[str, Any]) -> Tuple[str, str, int]:
     overdue = data.get("overdue", [])
     scheduled = data.get("scheduled", [])
     undated = data.get("undated", [])
+    missed = data.get("missed", [])
     total = len(overdue) + len(scheduled) + len(undated)
     title = f"trueassis：未来 3 天有 {total} 项待办"
     summary = f"逾期 {len(overdue)} · 未来三天 {len(scheduled)} · 无日期 {len(undated)}"
@@ -47,6 +47,8 @@ def build_message(data: Dict[str, Any]) -> Tuple[str, str, int]:
         lines.append(f"[{label}] {row.get('title', '未命名任务')}")
     if len(rows) > 4:
         lines.append(f"另有 {len(rows) - 4} 项，打开 trueassis 查看")
+    if missed:
+        lines.append(f"另有 {len(missed)} 次已错过，不用补做")
     return title, "\n".join(lines), total
 
 
