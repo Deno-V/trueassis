@@ -2,10 +2,7 @@
 from pathlib import Path
 import sys
 
-if sys.version_info < (3, 9):
-    raise SystemExit("trueassis 需要 Python 3.9+")
-
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from trueassis.cli import main
+from trueassis.reminder import main
 
 raise SystemExit(main())

@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import os
+import plistlib
+import re
+import subprocess
+import sys
+from pathlib import Path
+from typing import List
+
+ROOT = Path(__file__).resolve().parent
+RUNNER = ROOT / "tools" / "reminder"
+LABEL = "com.trueassis.daily-reminder"
+TASK_NAME = "trueassis-daily-reminder"
+
+
+def run(command: List[str], *, check: bool = True) -> subprocess.CompletedProcess:
+    return subprocess.run(command, check=check, text=True, capture_output=True, timeout=30)
+
+
+def parse_time(value: str) -> tuple[int, int]:
+    match = re.fullmatch(r"([01]\d|2[0-3]):([0-5]\d)", value)
+    if not match:
+        raise ValueError("时间格式必须是 HH:MM，例如 09:00")
+    return int(match.group(1)), int(match.group(2))
+
+
+def mac_path() -> Path:
+    return Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
+
+
+def install_macos(hour: int, minute: int) -> None:
+    path = mac_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    private = ROOT / "private"
+    private.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "Label": LABEL,
+        "ProgramArguments": [sys.executable, str(RUNNER)],
+        "WorkingDirectory": str(ROOT),
+        "StartCalendarInterval": {"Hour": hour, "Minute": minute},
+        "RunAtLoad": False,
+        "StandardOutPath": str(private / "reminder-output.log"),
+        "StandardErrorPath": str(private / "reminder-error.log"),
+    }
+    path.write_bytes(plistlib.dumps(payload, fmt=plistlib.FMT_XML, sort_keys=False))
+    domain = f"gui/{os.getuid()}"
+    run(["launchctl", "bootout", domain, str(path)], check=False)
+    run(["launchctl", "bootstrap", domain, str(path)])
+    run(["launchctl", "enable", f"{domain}/{LABEL}"], check=False)
+
+
+def uninstall_macos() -> None:
+    path = mac_path()
+    domain = f"gui/{os.getuid()}"
+    run(["launchctl", "bootout", domain, str(path)], check=False)
+    if path.exists():
+        path.unlink()
+
+
+def status_macos() -> bool:
+    result = run(["launchctl", "print", f"gui/{os.getuid()}/{LABEL}"], check=False)
+    return result.returncode == 0
+
+
+def windows_command() -> str:
+    return subprocess.list2cmdline([sys.executable, str(RUNNER)])
+
+
+def install_windows(hour: int, minute: int) -> None:
+    run(["schtasks", "/Create", "/F", "/SC", "DAILY", "/ST", f"{hour:02d}:{minute:02d}",
+         "/TN", TASK_NAME, "/TR", windows_command(), "/RL", "LIMITED", "/IT"])
+
+
+def uninstall_windows() -> None:
+    run(["schtasks", "/Delete", "/F", "/TN", TASK_NAME], check=False)
+
+
+def status_windows() -> bool:
+    return run(["schtasks", "/Query", "/TN", TASK_NAME], check=False).returncode == 0
+
+
+def linux_paths() -> tuple[Path, Path]:
+    root = Path.home() / ".config" / "systemd" / "user"
+    return root / "trueassis-reminder.service", root / "trueassis-reminder.timer"
+
+
+def systemd_quote(value: str) -> str:
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def install_linux(hour: int, minute: int) -> None:
+    service, timer = linux_paths()
+    service.parent.mkdir(parents=True, exist_ok=True)
+    service.write_text(
+        "[Unit]\nDescription=trueassis future task reminder\n\n"
+        "[Service]\nType=oneshot\n"
+        f"WorkingDirectory={systemd_quote(str(ROOT))}\n"
+        f"ExecStart={systemd_quote(sys.executable)} {systemd_quote(str(RUNNER))}\n",
+        encoding="utf-8",
+    )
+    timer.write_text(
+        "[Unit]\nDescription=Run trueassis reminder every day\n\n"
+        "[Timer]\n"
+        f"OnCalendar=*-*-* {hour:02d}:{minute:02d}:00\n"
+        "Persistent=true\n\n[Install]\nWantedBy=timers.target\n",
+        encoding="utf-8",
+    )
+    run(["systemctl", "--user", "daemon-reload"])
+    run(["systemctl", "--user", "enable", "--now", timer.name])
+
+
+def uninstall_linux() -> None:
+    service, timer = linux_paths()
+    run(["systemctl", "--user", "disable", "--now", timer.name], check=False)
+    for path in (timer, service):
+        if path.exists():
+            path.unlink()
+    run(["systemctl", "--user", "daemon-reload"], check=False)
+
+
+def status_linux() -> bool:
+    _, timer = linux_paths()
+    return run(["systemctl", "--user", "is-active", timer.name], check=False).returncode == 0
+
+
+def platform_handlers():
+    if sys.platform == "darwin":
+        return install_macos, uninstall_macos, status_macos
+    if os.name == "nt":
+        return install_windows, uninstall_windows, status_windows
+    if sys.platform.startswith("linux"):
+        return install_linux, uninstall_linux, status_linux
+    raise RuntimeError(f"暂不支持当前操作系统：{sys.platform}")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="安装 trueassis 每日系统提醒")
+    parser.add_argument("action", nargs="?", default="install", choices=["install", "uninstall", "status", "test"])
+    parser.add_argument("--time", default="09:00", help="每天提醒时间，默认 09:00")
+    args = parser.parse_args()
+    try:
+        hour, minute = parse_time(args.time)
+        install, uninstall, status = platform_handlers()
+        if args.action == "install":
+            install(hour, minute)
+            print(f"已安装 trueassis 每日提醒：每天 {hour:02d}:{minute:02d} 查询未来三天待办。")
+        elif args.action == "uninstall":
+            uninstall()
+            print("已卸载 trueassis 每日提醒。")
+        elif args.action == "status":
+            active = status()
+            print("trueassis 每日提醒已启用。" if active else "trueassis 每日提醒未启用。")
+            return 0 if active else 1
+        else:
+            result = run([sys.executable, str(RUNNER), "--test"], check=False)
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr.strip() or "测试通知发送失败")
+            print("测试通知已发送。")
+        return 0
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+        print(f"安装提醒失败：{exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
