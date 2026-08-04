@@ -116,65 +116,56 @@
 
 **逾期与无日期任务默认就会带出来**，不需要额外开关。只有在明确不想被它们干扰时才用 `--no-include-overdue`、`--no-include-undated` 关闭。
 
-先分清两个不同的轴，混淆它们会导致找不到数据：
+#### 返回的分区
 
-- **过滤轴**是 `--status` 的取值：`pending`、`open`、`done`、`cancelled`、`missed`、`archived`、`all`。它决定**要哪些记录**。
-- **分区轴**是 `data` 的键：`scheduled`、`overdue`、`undated`、`missed`、`done`、`cancelled`、`ideas`、`records`。它解释**这条记录为什么在这里**。
+结果放在 `data` 里，按“这条记录为什么在这里”分组：
 
-两轴有三个同名值（`missed`、`done`、`cancelled`），但 `pending`、`open`、`all` **只存在于过滤轴**。所以**没有 `data["pending"]` 这个分区**，不要去找它。
+- `scheduled`：区间内计划执行且未完成，含区间内已过期的项，这些项带 `is_overdue: true`；
+- `overdue`：区间**之前**仍欠着的 `carry` 任务，即历史欠账；
+- `undated`：无日期开放任务；
+- `done`：区间内完成；
+- `cancelled`：区间内取消；
+- `missed`：区间内已错过且不必补做的 `skip` 循环；
+- `ideas`：想法；
+- `records`：文本或 ID 定位结果，只在 `lookup` 模式出现，此时其他分区全部缺席。
 
-`--status pending` 是默认值，意思是**只回答「现在还欠着什么」**。这些欠着的事会按“为什么欠着”落进四个分区：今天该做的在 `scheduled`，历史欠账在 `overdue`，没有日期的在 `undated`，已错过不必补的在 `missed`。四个分区加起来就是 pending 的全部内容，因此默认查询**不显示已完成、已取消，也不显示想法**。日常问「今天该做什么」正好需要这个默认值。
+理解分区的关键：`scheduled` 回答“这段区间原本要做什么”，`overdue` 回答“这段区间之前还欠着什么”。因此查询历史区间时，当时未完成的任务留在 `scheduled` 并带 `is_overdue`，不会被错误地算成今天的欠账；查询未来区间时，尚未到期的任务也不会被误报为逾期。
 
-各取值的含义：
+`missed` 必须主动汇报。`skip` 的意思是“不用补做”，不是“不用知道”。用户连续错过运动或阅读时要如实说出来，例如“这三天计划跑三次，实际一次没跑”。
+
+#### 分区只在被查询时出现
+
+**`data` 里出现某个分区，才说明本次查询了它；此时空数组才代表确实没有。没被查询的分区不会出现在 `data` 里。**
+
+返回值里的 `queried` 列出本次覆盖了哪些分区，可以直接用来自检。例如默认查询返回的 `queried` 是 `[missed, overdue, scheduled, undated]`，`data` 里没有 `done`，这只说明没查，不代表用户没完成任何事。
+
+这样设计是刻意的：如果未查询的分区也给出空数组，就无法区分“今天没完成任何事”和“根本没查已完成”，很容易把后者误报成前者。
+
+#### `--status` 决定查哪些分区
+
+`--status` 是筛选条件，**它的取值不是分区名**。`data` 里不会出现叫 `pending` 的分区，不要去找它。
+
+不给 `--status` 时默认是 `pending`，意思是**只回答「现在还欠着什么」**。这些欠着的事按“为什么欠着”落进四个分区：今天该做的在 `scheduled`，历史欠账在 `overdue`，没有日期的在 `undated`，已错过不必补的在 `missed`。四个加起来就是 `pending` 的全部内容，所以默认查询**不显示已完成、已取消，也不显示想法**。日常问「今天该做什么」正好需要这个默认值。
 
 | `--status` | `data` 中出现的分区 |
 | --- | --- |
 | `pending`（默认） | `scheduled`、`overdue`、`undated`、`missed` |
-| `open` | 同 `pending`；对想法则表示未归档 |
+| `open` | 同 `pending`，另加 `ideas`（只含未归档的想法） |
 | `all` | 全部分区，含 `done`、`cancelled`、`ideas` |
 | `done` | 只有 `done` |
 | `cancelled` | 只有 `cancelled` |
 | `missed` | 只有 `missed` |
 | `archived` | 只有 `ideas`，且只含已归档的 |
 
-由此产生两条必须记住的规则：
+由此产生三条必须记住的规则：
 
-- **想法不会出现在默认查询里。** 想法的状态只有 `open` 和 `archived`，永不等于 `pending`。要看想法必须显式给 `--status all`、`--status open` 或 `--status archived`。
-- **回顾类问题必须换 `--status`。** 用户问“今天完成了什么”“这周做了哪些”，默认值会返回空的 `done`，必须用 `--status done` 或 `--status all`。生成日报前也要用 `--status all` 才能看到全貌。
+- **想法不会出现在默认查询里。** 想法的状态只有 `open` 和 `archived`，永不等于 `pending`。要看想法必须显式给 `--status open`（未归档）、`--status archived`（已归档）或 `--status all`（全部）。
+- **回顾类问题必须换 `--status`。** 用户问“今天完成了什么”“这周做了哪些”，默认查询里根本没有 `done` 分区，必须用 `--status done` 或 `--status all`。生成日报前也要用 `--status all` 才能看到全貌。
+- **绝不能因为默认查询里没有 `done` 就说用户今天没有进展。** 同理，`--no-include-overdue` 会让 `overdue` 整个缺席，那也不等于没有欠账。
 
 `--kind` 同样影响分区：`--kind task` 不会返回 `ideas`，`--kind idea` 只返回 `ideas`。
 
-想法的日期过滤也有一条约定：给了日期区间时按**想法的归属日**过滤，只返回该区间新增的想法；完全不给日期时不按日期过滤，返回全部匹配的想法。所以“我以前记过什么想法”要用不带日期的 `query --kind idea --status open`。
-
-### 分区只在被查询时出现
-
-**`data` 里出现某个分区，才说明本次查询了它；此时空数组才代表确实没有。没被查询的分区不会出现在 `data` 里。**
-
-因此默认查询不会返回 `done`、`cancelled`、`ideas`。这是刻意的：如果它们以空数组出现，就无法区分“今天没完成任何事”和“根本没查已完成”，很容易把后者误报成前者。
-
-返回值里的 `queried` 列出本次覆盖的分区，可以直接用来自检。
-
-```text
-# 默认 pending：queried 为 [missed, overdue, scheduled, undated]，data 里没有 done
-./tools/assis query --from 2026-08-05 --to 2026-08-05
-```
-
-所以判断“今天完成了什么”只有一条路：先用 `--status done` 或 `--status all` 查，再看 `done`。**绝不能因为默认查询里没有 `done` 就说用户今天没有进展。** 同理，`--no-include-overdue` 会让 `overdue` 整个缺席，那也不等于没有欠账。
-
-返回分区：
-
-- `records`：文本或 ID 定位结果，只在 `lookup` 模式出现，此时其他分区全部缺席；
-- `scheduled`：区间内计划执行且未完成，含区间内已过期的项，这些项带`is_overdue: true`；
-- `overdue`：区间**之前**仍欠着的 `carry` 任务，即历史欠账；
-- `undated`：无日期开放任务；
-- `done`：区间内完成；
-- `cancelled`：区间内取消；
-- `missed`：区间内已错过且不必补做的 `skip` 循环；
-- `ideas`：想法。
-
-理解分区的关键：`scheduled` 回答“这段区间原本要做什么”，`overdue` 回答“这段区间之前还欠着什么”。因此查询历史区间时，当时未完成的任务留在 `scheduled` 并带 `is_overdue`，不会被错误地算成今天的欠账；查询未来区间时，尚未到期的任务也不会被误报为逾期。
-
-`missed` 必须主动汇报。`skip` 的意思是“不用补做”，不是“不用知道”。用户连续错过运动或阅读时要如实说出来，例如“这三天计划跑三次，实际一次没跑”。
+想法的日期过滤有一条约定：给了日期区间时按**想法的归属日**过滤，只返回该区间新增的想法；完全不给日期时不按日期过滤，返回全部匹配的想法。所以“我以前记过什么想法”要用不带日期的 `query --kind idea --status open`。
 
 `--overdue-days` 限制循环 `carry` 向前追溯的天数，默认一年；一次性任务的欠账不受此限制。
 

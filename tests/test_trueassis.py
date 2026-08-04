@@ -469,6 +469,7 @@ class TrueAssisTest(unittest.TestCase):
         """字段存在即已查询；空数组才代表确实没有。这条契约不能被破坏。"""
         cases = {
             "pending": {"scheduled", "overdue", "undated", "missed"},
+            "open": {"scheduled", "overdue", "undated", "missed", "ideas"},
             "done": {"done"},
             "cancelled": {"cancelled"},
             "missed": {"missed"},
