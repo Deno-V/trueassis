@@ -512,5 +512,30 @@ class TrueAssisTest(unittest.TestCase):
             self.assertTrue(set(result["queried"]) <= partitions, f"status={status}")
 
 
+    def test_cli_injects_today_as_first_field(self):
+        """每个 assis 命令结果首字段必须是 today，防止长对话里 agent 记错今天。"""
+        import io, contextlib
+        from trueassis import cli
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.main(["query", "--from", "2026-08-04", "--to", "2026-08-04"])
+        import json
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(0, rc)
+        self.assertEqual("today", list(payload.keys())[0])
+        self.assertEqual("2026-08-04", payload["today"])
+
+    def test_cli_error_response_also_carries_today(self):
+        import io, contextlib, json
+        from trueassis import cli
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.main(["update", "不存在", "--action", "complete"])
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(1, rc)
+        self.assertEqual("today", list(payload.keys())[0])
+        self.assertFalse(payload["ok"])
+
+
 if __name__ == "__main__":
     unittest.main()

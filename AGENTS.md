@@ -11,7 +11,8 @@
 - 不删除记录。任务取消、想法归档都保留历史。
 - 修改已有记录前必须先查询。查询可模糊；`update` 必须使用完整 ID。
 - 唯一候选可直接操作；多个候选必须一次性列出并请用户确认。
-- 日期换算为 `YYYY-MM-DD`。
+- 日期尽可能传相对描述（`today`/`tomorrow`/`+3d`/`yesterday`）给工具，由工具解析，不要自己换算成 ISO。只有用户给出绝对日期或周几参照时才换算，且此时以最近一次命令结果首字段的 `today` 为准；拿不准就先跑一次 `query` 或 `config` 对齐。
+- 每个命令结果的首字段都是 `today`，它是工具用代码确定的逻辑今天，长对话里你记忆的今天会过期，只有它不会。
 - 输出人话结论，不粘贴命令和原始 JSON。
 
 ## 1.5 日界时间
@@ -186,7 +187,7 @@
 
 ```text
 ./tools/assis update task-20260804-ab12cd34 --action complete
-./tools/assis update task-20260804-ab12cd34 --action reschedule --to 2026-08-10
+./tools/assis update task-20260804-ab12cd34 --action reschedule --to +5d
 ./tools/assis update task-20260804-ab12cd34 --action cancel --reason "需求已撤销"
 ./tools/assis update task-20260804-ab12cd34 --action complete --occurrence 2026-08-05 --note "跑了5公里"
 ./tools/assis update task-20260804-ab12cd34 --action complete --on-date 2026-08-01
