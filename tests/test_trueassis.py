@@ -537,5 +537,48 @@ class TrueAssisTest(unittest.TestCase):
         self.assertFalse(payload["ok"])
 
 
+        def test_usage_log_records_every_command(self):
+            """每次 assis 命令都追加一行到 private/usage.log，只记命令名和成败。"""
+            import io, contextlib, json
+            from trueassis import cli
+            self.service.create_task(self.ns(title="已有任务", due="2026-08-04"))
+            log_path = self.storage.PRIVATE / "usage.log"
+            if log_path.exists():
+                log_path.unlink()
+            cases = [
+                (["task", "新任务", "--category", "work", "--due", "today"], True),
+                (["query", "--from", "today", "--to", "today"], True),
+                (["idea", "想法", "--category", "other"], True),
+                (["config"], True),
+                (["update", "不存在", "--action", "complete"], False),
+            ]
+            for argv, expect_ok in cases:
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    cli.main(argv)
+            lines = log_path.read_text(encoding="utf-8").strip().splitlines()
+            self.assertEqual(5, len(lines))
+            entries = [json.loads(line) for line in lines]
+            self.assertEqual(["task", "query", "idea", "config", "update"],
+                [e["command"] for e in entries])
+            self.assertEqual([True, True, True, True, False],
+                [e["ok"] for e in entries])
+            for entry in entries:
+                self.assertIn("at", entry)
+                self.assertIn("command", entry)
+                self.assertIn("ok", entry)
+
+        def test_usage_log_excluded_from_git(self):
+            """usage.log 落在 private/ 下，已被 .gitignore 整体忽略。"""
+            gitignore = (Path(__file__).resolve().parent.parent / ".gitignore").read_text()
+            self.assertIn("/private/", gitignore)
+
+
+    def test_usage_log_excluded_from_git(self):
+        """usage.log 落在 private/ 下，已被 .gitignore 整体忽略。"""
+        gitignore = (Path(__file__).resolve().parent.parent / ".gitignore").read_text()
+        self.assertIn("/private/", gitignore)
+
+
 if __name__ == "__main__":
     unittest.main()

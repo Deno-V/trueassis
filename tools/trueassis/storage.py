@@ -196,6 +196,14 @@ def find_record(record_id: str) -> Tuple[Path, Dict[str, Any], str]:
     return matches[0]
 
 
+def append_usage(command: str, ok: bool) -> None:
+    """每次 assis 命令追加一行 JSON 到 private/usage.log。只记命令名和成败，不记参数值。"""
+    ensure_private()
+    entry = json.dumps({"at": now_iso(), "command": command, "ok": ok}, ensure_ascii=False)
+    with (PRIVATE / "usage.log").open("a", encoding="utf-8") as stream:
+        stream.write(entry + "\n")
+
+
 def validate_record(data: Dict[str, Any]) -> None:
     required = {"schema", "id", "kind", "title", "category", "tags", "status", "created_at", "updated_at", "history"}
     missing = sorted(required - set(data))

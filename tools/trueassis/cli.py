@@ -7,7 +7,7 @@ from typing import Any
 
 from .report import generate_report
 from .service import configure, create_idea, create_task, query, update
-from .storage import CATEGORIES, ensure_private, today
+from .storage import CATEGORIES, append_usage, ensure_private, today
 
 
 def emit(value: Any) -> None:
@@ -98,15 +98,18 @@ def main(argv: Any = None) -> int:
     ensure_private()
     parser = build_parser()
     args = parser.parse_args(argv)
+    command = args.command
     try:
         result = args.handler(args)
         if isinstance(result, dict):
             # 首字段带上代码确定的逻辑今天，作为 agent 的对齐锚点，防止长对话里记错今天
             result = {"today": today().isoformat(), **result}
         emit(result)
+        append_usage(command, True)
         return 0
     except (ValueError, OSError, json.JSONDecodeError) as exc:
         emit({"today": today().isoformat(), "ok": False, "error": str(exc)})
+        append_usage(command, False)
         return 1
 
 
